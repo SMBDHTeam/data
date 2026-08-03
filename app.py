@@ -15,7 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover
     from data.place_analysis import PlaceAnalysis, analyze_place
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR.parent / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"
+MODEL_PATH = BASE_DIR / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"
 
 SELECTED_NUMERIC_COLS = [
     "mapx",

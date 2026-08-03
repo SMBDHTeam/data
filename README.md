@@ -5,6 +5,8 @@ Standalone Python inference server for the TourAPI category classifier.
 It is intentionally kept outside the Spring `server` project so the Java API and
 the Python model service can evolve independently.
 
+Model artifacts are stored inside this repository under `data/model_artifacts/`.
+
 ## Run
 
 ```bash

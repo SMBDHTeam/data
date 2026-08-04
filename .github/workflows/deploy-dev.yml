@@ -136,6 +136,7 @@ jobs:
             docker run -d \
               --name data-ai \
               --restart unless-stopped \
+              --network hackathon-network \
               -p 127.0.0.1:8010:8010 \
               ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:latest-dev
 

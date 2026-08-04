@@ -1,0 +1,240 @@
+name: Deploy AI Server
+
+on:
+  push:
+    branches:
+      - main
+
+# 여러 배포가 동시에 실행되는 것 방지
+concurrency:
+  group: deploy-data-ai
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+
+  deploy:
+
+    name: Build and Deploy AI Server
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+
+      # GitHub 코드 다운로드
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+
+
+      # Docker Build 환경 설정
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+
+
+      # GitHub Actions -> AWS 인증
+      # OIDC 방식 사용
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+
+
+      # ECR 로그인
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+
+
+      # Docker 이미지 빌드 후 ECR Push
+      - name: Build and push AI image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_NAME }}:latest-dev
+            ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY_NAME }}:${{ github.sha }}
+
+          # GitHub Actions Docker Layer Cache 사용
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+
+
+      # EC2 배포
+      - name: Deploy to Dev EC2
+
+        env:
+
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+          DEV_SSH_USER: ${{ secrets.DEV_SSH_USER }}
+          DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
+
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+
+          ECR_REPOSITORY_NAME: ${{ secrets.ECR_REPOSITORY_NAME }}
+
+
+
+        run: |
+
+
+          echo "Prepare SSH"
+
+
+          mkdir -p ~/.ssh
+
+          chmod 700 ~/.ssh
+
+
+          printf '%s\n' "$DEV_SSH_KEY" > ~/.ssh/dev_key
+
+          chmod 600 ~/.ssh/dev_key
+
+
+
+          echo "Register EC2 host"
+
+
+          ssh-keyscan \
+            -H "$DEV_HOST" \
+            >> ~/.ssh/known_hosts
+
+
+
+          echo "Deploy AI container"
+
+
+          ssh \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -i ~/.ssh/dev_key \
+            "$DEV_SSH_USER@$DEV_HOST" << EOF
+
+
+              set -euo pipefail
+
+
+
+              echo "[1/7] Create deploy directory"
+
+
+              sudo mkdir -p /opt/hackathon-data-ai
+
+              sudo chown -R $DEV_SSH_USER:$DEV_SSH_USER /opt/hackathon-data-ai
+
+
+
+
+              echo "[2/7] Login ECR"
+
+
+
+              aws ecr get-login-password \
+                --region ${AWS_REGION} \
+              | docker login \
+                  --username AWS \
+                  --password-stdin ${ECR_REGISTRY}
+
+
+
+
+              echo "[3/7] Pull latest AI image"
+
+
+
+              docker pull \
+                ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:latest-dev
+
+
+
+
+              echo "[4/7] Replace old container"
+
+
+
+              docker stop data-ai || true
+
+              docker rm data-ai || true
+
+
+
+
+              echo "[5/7] Start AI container"
+
+
+
+              docker run -d \
+                --name data-ai \
+                --restart unless-stopped \
+                -p 127.0.0.1:8010:8010 \
+                ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:latest-dev
+
+
+
+
+
+              echo "[6/7] Container status"
+
+
+
+              sleep 5
+
+
+
+              if [ "\$(docker inspect -f '{{.State.Running}}' data-ai)" != "true" ]; then
+
+                echo "AI container failed"
+
+                docker logs --tail 100 data-ai || true
+
+                exit 1
+
+              fi
+
+
+
+
+
+              echo "[7/7] Health Check"
+
+
+
+              curl \
+                -fsS \
+                http://127.0.0.1:8010/health
+
+
+
+
+              echo "Remove unused images"
+
+
+
+              docker image prune -f
+
+
+
+
+              echo "AI deployment completed"
+
+EOF
+
+
+
+          rm -f ~/.ssh/dev_key

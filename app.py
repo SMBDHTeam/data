@@ -2,17 +2,57 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+try:
+    from runtime_env import load_runtime_env
+except ModuleNotFoundError:  # pragma: no cover
+    from data.runtime_env import load_runtime_env
+
+load_runtime_env()
 
 try:
     from place_analysis import PlaceAnalysis, analyze_place
+    from schedule_models import (
+        ScheduleCreateRequest,
+        ScheduleListResponse,
+        ScheduleMapResponse,
+        ScheduleResponse,
+        ScheduleUpdateRequest,
+    )
+    from schedule_service import (
+        CANDIDATE_POOL,
+        CANDIDATE_POOL_SOURCE,
+        create_schedule,
+        get_schedule,
+        get_schedule_map,
+        list_schedules,
+        update_schedule,
+    )
 except ModuleNotFoundError:  # pragma: no cover
     from data.place_analysis import PlaceAnalysis, analyze_place
+    from data.schedule_models import (
+        ScheduleCreateRequest,
+        ScheduleListResponse,
+        ScheduleMapResponse,
+        ScheduleResponse,
+        ScheduleUpdateRequest,
+    )
+    from data.schedule_service import (
+        CANDIDATE_POOL,
+        CANDIDATE_POOL_SOURCE,
+        create_schedule,
+        get_schedule,
+        get_schedule_map,
+        list_schedules,
+        update_schedule,
+    )
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"
@@ -83,6 +123,8 @@ KEYWORD_CATEGORY_RULES = (
 
 
 class PredictRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     title: str = Field(default="")
     overview: str | None = None
     addr1: str | None = None
@@ -106,6 +148,8 @@ class PredictRequest(BaseModel):
 
 
 class PredictResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     primary_category: str
     theme_answer_id: str | None
     model_category: str | None
@@ -194,6 +238,19 @@ def load_model():
     return joblib.load(MODEL_PATH)
 
 
+def source_category_from_payload(payload: PredictRequest) -> str:
+    return (
+        payload.cat3
+        or payload.cat2
+        or payload.cat1
+        or payload.lclsSystm3
+        or payload.lclsSystm2
+        or payload.lclsSystm1
+        or payload.contenttypeid
+        or ""
+    ).strip().upper()
+
+
 def normalize_text(*values: str | None) -> str:
     return " ".join(value.strip() for value in values if value and value.strip()).lower()
 
@@ -214,15 +271,7 @@ def rule_based_category(payload: PredictRequest) -> tuple[str | None, str | None
     if content_type_id in CONTENT_TYPE_CATEGORY_RULES:
         return CONTENT_TYPE_CATEGORY_RULES[content_type_id], "contenttypeid"
 
-    source_category = (
-        payload.cat3
-        or payload.cat2
-        or payload.cat1
-        or payload.lclsSystm3
-        or payload.lclsSystm2
-        or payload.lclsSystm1
-        or ""
-    ).strip().upper()
+    source_category = source_category_from_payload(payload)
     for prefix, category in CAT3_PREFIX_CATEGORY_RULES:
         if source_category.startswith(prefix):
             return category, "cat3_prefix"
@@ -233,10 +282,50 @@ def rule_based_category(payload: PredictRequest) -> tuple[str | None, str | None
     return None, None
 
 
+def known_source_categories() -> set[str]:
+    if not hasattr(model, "named_steps"):
+        return set()
+    preprocessor = model.named_steps.get("preprocessor")
+    if preprocessor is None or not hasattr(preprocessor, "transformers_"):
+        return set()
+    cat_transformer = next(
+        (transformer for name, transformer, _ in preprocessor.transformers_ if name == "cat"),
+        None,
+    )
+    if cat_transformer is None or not hasattr(cat_transformer, "named_steps"):
+        return set()
+    onehot = cat_transformer.named_steps.get("onehot")
+    if onehot is None or not hasattr(onehot, "categories_") or len(onehot.categories_) < 2:
+        return set()
+    return {str(category) for category in onehot.categories_[1]}
+
+
+def conservative_keyword_override(payload: PredictRequest, model_prediction: str) -> tuple[str | None, str | None]:
+    source_category = source_category_from_payload(payload)
+    if not source_category or source_category in MODEL_SOURCE_CATEGORIES:
+        return None, None
+
+    keyword_match = keyword_category(normalize_text(payload.title, payload.overview, payload.addr1))
+    if keyword_match is None or keyword_match == model_prediction:
+        return None, None
+
+    content_type_id = (payload.contenttypeid or "").strip()
+    if content_type_id == "12" and keyword_match == "NATURE":
+        return "NATURE", "keyword_unknown_source_tourism_override"
+
+    if model_prediction in {"FOOD", "SHOPPING"} and keyword_match in {"NATURE", "CULTURE", "ACTIVITY", "HEALING"}:
+        return keyword_match, "keyword_unknown_source_override"
+
+    return None, None
+
+
 def resolve_primary_category(payload: PredictRequest, model_prediction: str) -> tuple[str, str]:
     category, source = rule_based_category(payload)
     if category is not None:
         return category, source or "rule"
+    conservative_override, override_source = conservative_keyword_override(payload, model_prediction)
+    if conservative_override is not None:
+        return conservative_override, override_source or "keyword_override"
     return model_prediction, "model"
 
 
@@ -275,11 +364,17 @@ def response_from_prediction(
 
 app = FastAPI(title="TourAPI AI Server", version="0.1.0")
 model = load_model()
+MODEL_SOURCE_CATEGORIES = known_source_categories()
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "model_path": str(MODEL_PATH)}
+def health() -> dict[str, str | int]:
+    return {
+        "status": "ok",
+        "model_path": str(MODEL_PATH),
+        "schedule_candidate_source": CANDIDATE_POOL_SOURCE,
+        "schedule_candidate_count": len(CANDIDATE_POOL),
+    }
 
 
 @app.post("/predict", response_model=PredictResponse)
@@ -342,3 +437,28 @@ def predict_batch(payloads: list[PredictRequest]) -> list[PredictResponse]:
         return responses
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/schedules", response_model=ScheduleResponse, status_code=201)
+def create_schedule_endpoint(payload: ScheduleCreateRequest) -> ScheduleResponse:
+    return create_schedule(payload)
+
+
+@app.get("/api/v1/schedules", response_model=ScheduleListResponse)
+def list_schedules_endpoint() -> ScheduleListResponse:
+    return list_schedules()
+
+
+@app.get("/api/v1/schedules/{schedule_id}", response_model=ScheduleResponse)
+def get_schedule_endpoint(schedule_id: UUID) -> ScheduleResponse:
+    return get_schedule(schedule_id)
+
+
+@app.patch("/api/v1/schedules/{schedule_id}", response_model=ScheduleResponse)
+def update_schedule_endpoint(schedule_id: UUID, payload: ScheduleUpdateRequest) -> ScheduleResponse:
+    return update_schedule(schedule_id, payload)
+
+
+@app.get("/api/v1/schedules/{schedule_id}/map", response_model=ScheduleMapResponse)
+def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> ScheduleMapResponse:
+    return get_schedule_map(schedule_id, dayNo)

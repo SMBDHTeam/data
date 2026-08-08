@@ -62,6 +62,12 @@ The Python AI server and the Spring server are intentionally separate.
 - `data`: model inference only
 - `server`: API, DB access, schedule generation
 
+The FastAPI schedule migration now supports a read path for place candidates too.
+
+- First choice: shared PostgreSQL using `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`
+- Fallback: local PostgreSQL variables such as `LOCAL_POSTGRES_HOST`, `LOCAL_POSTGRES_PORT`, `LOCAL_POSTGRES_DB`, `LOCAL_POSTGRES_USER`, `LOCAL_POSTGRES_PASSWORD`
+- Final fallback: [`candidate_places.json`](/Users/miju/test_1/data/candidate_places.json)
+
 Pointing your local Spring server at the shared development DB is possible, but
 it should be done carefully.
 

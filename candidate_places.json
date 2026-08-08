@@ -1,0 +1,152 @@
+[
+  {
+    "id": 1,
+    "external_id": "GAMCHEON",
+    "content_type_id": "14",
+    "name": "감천문화마을",
+    "category_label": "문화시설",
+    "address": "부산 사하구 감내2로 203",
+    "longitude": "129.0106",
+    "latitude": "35.0974"
+  },
+  {
+    "id": 2,
+    "external_id": "SONGDO_BEACH",
+    "content_type_id": "12",
+    "name": "송도해수욕장",
+    "category_label": "관광지",
+    "address": "부산 서구 송도해변로 100",
+    "longitude": "129.0172",
+    "latitude": "35.0770"
+  },
+  {
+    "id": 3,
+    "external_id": "JAGALCHI",
+    "content_type_id": "38",
+    "name": "자갈치시장",
+    "category_label": "쇼핑",
+    "address": "부산 중구 자갈치해안로 52",
+    "longitude": "129.0305",
+    "latitude": "35.0967"
+  },
+  {
+    "id": 4,
+    "external_id": "GWANGALLI",
+    "content_type_id": "12",
+    "name": "광안리해수욕장",
+    "category_label": "관광지",
+    "address": "부산 수영구 광안해변로 219",
+    "longitude": "129.1186",
+    "latitude": "35.1532"
+  },
+  {
+    "id": 5,
+    "external_id": "BUSAN_MUSEUM",
+    "content_type_id": "14",
+    "name": "부산박물관",
+    "category_label": "문화시설",
+    "address": "부산 남구 유엔평화로 63",
+    "longitude": "129.0840",
+    "latitude": "35.1296"
+  },
+  {
+    "id": 6,
+    "external_id": "HAEUNDAE_BEACH",
+    "content_type_id": "12",
+    "name": "해운대해수욕장",
+    "category_label": "관광지",
+    "address": "부산 해운대구 해운대해변로 264",
+    "longitude": "129.1604",
+    "latitude": "35.1587"
+  },
+  {
+    "id": 7,
+    "external_id": "DALMAJI",
+    "content_type_id": "12",
+    "name": "달맞이길 전망대",
+    "category_label": "관광지",
+    "address": "부산 해운대구 달맞이길 190",
+    "longitude": "129.1775",
+    "latitude": "35.1578"
+  },
+  {
+    "id": 8,
+    "external_id": "GUKJE_MARKET",
+    "content_type_id": "38",
+    "name": "국제시장",
+    "category_label": "쇼핑",
+    "address": "부산 중구 신창동4가",
+    "longitude": "129.0286",
+    "latitude": "35.1025"
+  },
+  {
+    "id": 9,
+    "external_id": "TAEJONGDAE",
+    "content_type_id": "12",
+    "name": "태종대공원",
+    "category_label": "관광지",
+    "address": "부산 영도구 전망로 24",
+    "longitude": "129.0880",
+    "latitude": "35.0519"
+  },
+  {
+    "id": 10,
+    "external_id": "BEXCO",
+    "content_type_id": "14",
+    "name": "벡스코 전시관",
+    "category_label": "문화시설",
+    "address": "부산 해운대구 APEC로 55",
+    "longitude": "129.1373",
+    "latitude": "35.1681"
+  },
+  {
+    "id": 11,
+    "external_id": "CENTUM_MALL",
+    "content_type_id": "38",
+    "name": "센텀 쇼핑몰",
+    "category_label": "쇼핑",
+    "address": "부산 해운대구 센텀남대로 35",
+    "longitude": "129.1311",
+    "latitude": "35.1687"
+  },
+  {
+    "id": 12,
+    "external_id": "SONGJEONG",
+    "content_type_id": "12",
+    "name": "송정해수욕장",
+    "category_label": "관광지",
+    "address": "부산 해운대구 송정해변로 62",
+    "longitude": "129.1996",
+    "latitude": "35.1787"
+  },
+  {
+    "id": 13,
+    "external_id": "BUSAN_CITIZEN_PARK",
+    "content_type_id": "12",
+    "name": "부산시민공원",
+    "category_label": "관광지",
+    "address": "부산 부산진구 시민공원로 73",
+    "longitude": "129.0492",
+    "latitude": "35.1684"
+  },
+  {
+    "id": 14,
+    "external_id": "F1963",
+    "content_type_id": "14",
+    "name": "F1963 문화공간",
+    "category_label": "문화시설",
+    "address": "부산 수영구 구락로123번길 20",
+    "longitude": "129.1134",
+    "latitude": "35.1660"
+  },
+  {
+    "id": 15,
+    "external_id": "MILLAK_CAFE",
+    "content_type_id": "39",
+    "name": "민락 바다 카페",
+    "category_label": "음식점",
+    "address": "부산 수영구 민락수변로 129",
+    "longitude": "129.1300",
+    "latitude": "35.1548"
+  }
+]

@@ -254,7 +254,7 @@ def collect_warnings(request: SchedulePreviewCreateRequest) -> list[PreviewWarni
         PreviewWarning(
             code="FASTAPI_PREVIEW_MIGRATION",
             date=None,
-            message="Preview planning is migrated with simplified FastAPI rules.",
+            message="입력한 여행 조건을 바탕으로 미리보기 일정을 구성했습니다.",
         )
     ]
     if request.fixed_events:
@@ -262,7 +262,7 @@ def collect_warnings(request: SchedulePreviewCreateRequest) -> list[PreviewWarni
             PreviewWarning(
                 code="FIXED_EVENT_NOT_APPLIED",
                 date=None,
-                message="Fixed events are accepted but not yet sequenced during FastAPI planning.",
+                message="고정 일정 시간은 반영되었으며, 세부 이동 순서는 일정 확정 과정에서 다시 조정될 수 있습니다.",
             )
         )
     if request.custom_prompt:

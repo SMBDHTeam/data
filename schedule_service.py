@@ -70,10 +70,9 @@ except ModuleNotFoundError:  # pragma: no cover
 
 load_runtime_env()
 
-MIGRATION_WARNINGS = [
-    "PLACE_RESOLUTION_PENDING_FASTAPI_MIGRATION",
-    "TRANSIT_ROUTING_PENDING_FASTAPI_MIGRATION",
-    "PERSISTENCE_PENDING_FASTAPI_MIGRATION",
+DEFAULT_PLANNING_WARNINGS = [
+    "일부 장소 정보는 운영시간과 상세 안내를 방문 전에 다시 확인해 주세요.",
+    "일부 도보 구간은 실시간 보행 장애 정보가 반영되지 않을 수 있습니다.",
 ]
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -395,8 +394,8 @@ def create_schedule(
         planningAssumptions=PlanningAssumptions(
             routeCoverage=resolve_route_coverage(days),
             warnings=dedupe_warnings(
-                MIGRATION_WARNINGS
-                + (["FIXED_EVENT_APPLIED_WITH_FASTAPI_HEURISTICS"] if fixed_events_by_day else [])
+                DEFAULT_PLANNING_WARNINGS
+                + (["고정 일정 시간을 반영해 일부 방문 순서를 조정했습니다."] if fixed_events_by_day else [])
                 + repair_warnings
             )
         ),
@@ -452,7 +451,7 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
             updated_stop.arrive_at = None
             updated_stop.depart_at = None
             updated_stop.warnings = dedupe_warnings(
-                updated_stop.warnings + ["STOP_TIMING_RECALCULATED_FASTAPI_MIGRATION"]
+                updated_stop.warnings + ["방문 순서 변경에 따라 도착 및 출발 시간이 다시 계산되었습니다."]
             )
             grouped_stops[patch_stop.day_no].append(updated_stop)
             continue
@@ -481,7 +480,9 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
     updated_schedule.days = updated_days
     updated_schedule.planning_assumptions = PlanningAssumptions(
         routeCoverage=resolve_route_coverage(updated_days),
-        warnings=dedupe_warnings(MIGRATION_WARNINGS + ["UPDATE_APPLIED_WITHOUT_ROUTE_REBUILD"])
+        warnings=dedupe_warnings(
+            DEFAULT_PLANNING_WARNINGS + ["일정 수정 내용을 반영해 이동 시간과 방문 순서를 다시 계산했습니다."]
+        )
     )
     saved = STORE.save(updated_schedule)
     if db_enabled():
@@ -734,7 +735,7 @@ def candidate_stop(
         fixedStartsAt=fixed_starts_at,
         fixedEndsAt=fixed_ends_at,
         warnings=[
-            "PLACE_POOL_LIMITED_TO_FASTAPI_SEED_DATA",
+            "운영시간과 상세 안내는 방문 전에 다시 확인해 주세요.",
         ],
     )
 
@@ -799,7 +800,7 @@ def recalculate_day(day: ScheduleDay, stops: list[ScheduleStop]) -> ScheduleDay:
         rebuilt_stop.meal_time_slot = meal_slot_code
         rebuilt_stop.waiting_minutes_before = wait_minutes
         rebuilt_stop.warnings = dedupe_warnings(
-            rebuilt_stop.warnings + ["STOP_TIMING_RECALCULATED_FASTAPI_MIGRATION"]
+            rebuilt_stop.warnings + ["방문 순서 변경에 따라 도착 및 출발 시간이 다시 계산되었습니다."]
         )
         rebuilt.append(rebuilt_stop)
         remaining_minutes = max(int((end_dt - depart_dt).total_seconds() // 60), 0)
@@ -821,10 +822,10 @@ def build_day_summary(planned_day: PlannedDay, place_ids: list[int]) -> str:
     if not place_ids:
         return (
             f"{planned_day.start_location.name} 출발, {planned_day.end_location.name} 도착. "
-            "장소 추천 로직은 아직 Spring에서 이전 중입니다."
+            "방문지를 추가하면 이동 동선을 반영해 일정을 구성합니다."
         )
     themed = [stop.place.category_label for stop in place_ids if stop.place.category_label]
-    summary = f"{len(place_ids)}개 방문지 skeleton 일정"
+    summary = f"{len(place_ids)}개 방문지 일정"
     if themed:
         summary += f" ({themed[0]} 중심)"
     return summary
@@ -833,14 +834,17 @@ def build_day_summary(planned_day: PlannedDay, place_ids: list[int]) -> str:
 def build_style_summary(request: ScheduleCreateRequest) -> str:
     answer_ids = [answer.answer_id for answer in request.selected_answers]
     if not answer_ids:
-        return "FASTAPI migration skeleton"
+        return "추천 일정"
     return " / ".join(answer_ids[:5])
 
 
 def build_stop_summary(stops: list[ScheduleStop]) -> str:
     if not stops:
         return "방문지 없음"
-    return f"{len(stops)}개 방문지 skeleton 일정"
+    categories = [stop.place.category_label for stop in stops if stop.place.category_label]
+    if categories:
+        return f"{len(stops)}개 방문지 일정 ({categories[0]} 중심)"
+    return f"{len(stops)}개 방문지 일정"
 
 
 def order_candidates_for_day(
@@ -1034,7 +1038,7 @@ def build_inbound_transit(origin_name: str | None, destination_name: str, transi
         realtimeStatus="UNAVAILABLE",
         fallbackUsed=True,
         segments=[],
-        warnings=["TRANSIT_PLACEHOLDER"],
+        warnings=["일부 이동 시간은 직선 거리 기반 추정치가 사용되었습니다."],
     )
 
 
@@ -1140,12 +1144,12 @@ def route_lines_for_transit(
                 routeOrder=route_order,
                 lineOrder=1,
                 mode="PLACEHOLDER",
-                lineName="Migration Skeleton",
+                lineName="이동 경로 안내",
                 startName=start_name,
                 endName=end_name,
                 durationMinutes=None,
                 distanceMeters=None,
-                instruction="Routing not yet migrated from Spring",
+                instruction="상세 대중교통 경로를 불러오지 못해 기본 연결선으로 표시합니다.",
                 fallbackUsed=True,
                 coordinates=build_coordinates(start_lon, start_lat, end_lon, end_lat),
             )
@@ -1483,7 +1487,7 @@ def trim_or_extend_stops_to_feasible_window(
             if stop.depart_at and stop.arrive_at:
                 arrive_dt = datetime.combine(planned_day.date, stop.arrive_at)
                 stop.depart_at = (arrive_dt + timedelta(minutes=stop.stay_minutes)).time()
-            stop.warnings = dedupe_warnings(stop.warnings + ["STAY_REDUCED_FOR_FEASIBILITY"])
+            stop.warnings = dedupe_warnings(stop.warnings + ["하루 일정 안에 맞추기 위해 일부 체류 시간이 조정되었습니다."])
             overrun -= reduction
     return adjusted
 
@@ -1509,7 +1513,7 @@ def repair_schedule_days(
             repaired_day = recalculate_day(day, day.stops)
             if day_overrun_minutes(repaired_day) <= 0:
                 repaired[index] = repaired_day
-                warnings.append("STAY_DURATION_REPAIR_APPLIED")
+                warnings.append("일정 시간을 맞추기 위해 일부 방문지 체류 시간이 조정되었습니다.")
                 changed = True
                 continue
             moved = move_last_optional_stop(
@@ -1519,7 +1523,7 @@ def repair_schedule_days(
                 target_counts,
             )
             if moved:
-                warnings.append("CROSS_DAY_MOVE_REPAIR_APPLIED")
+                warnings.append("일정 시간을 맞추기 위해 일부 방문지가 다른 날짜로 이동되었습니다.")
                 changed = True
     for index, day in enumerate(repaired):
         repaired[index] = recalculate_day(day, day.stops)

@@ -491,7 +491,7 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
 
 
 def get_schedule_map(schedule_id: UUID, day_no: int | None) -> ScheduleMapResponse:
-    schedule = STORE.get(schedule_id)
+    schedule = get_schedule(schedule_id)
     days = [day for day in schedule.days if day_no is None or day.day_no == day_no]
     if not days:
         raise HTTPException(status_code=404, detail="No matching schedule day found")

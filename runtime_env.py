@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-DB_ENV_KEYS = {
+RUNTIME_ENV_KEYS = {
     "SPRING_DATASOURCE_URL",
     "SPRING_DATASOURCE_USERNAME",
     "SPRING_DATASOURCE_PASSWORD",
@@ -12,6 +12,12 @@ DB_ENV_KEYS = {
     "LOCAL_POSTGRES_DB",
     "LOCAL_POSTGRES_USER",
     "LOCAL_POSTGRES_PASSWORD",
+    "ODSAY_ENABLED",
+    "ODSAY_BASE_URL",
+    "ODSAY_API_KEY",
+    "TMAP_WALKING_ENABLED",
+    "TMAP_BASE_URL",
+    "SKT_API_KEY",
 }
 
 
@@ -40,7 +46,7 @@ def load_env_file(path: Path) -> None:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        if key not in DB_ENV_KEYS:
+        if key not in RUNTIME_ENV_KEYS:
             continue
         value = value.strip().strip('"').strip("'")
         if not value or key in os.environ:

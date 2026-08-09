@@ -345,7 +345,7 @@ def tmap_walk_transit(
         waitMinutes=0,
         transferCount=0,
         fareAmount=None,
-        provider="TMAP_WALK",
+        provider="TMAP",
         realtimeStatus="UNAVAILABLE",
         fallbackUsed=False,
         segments=[
@@ -424,8 +424,11 @@ def find_tmap_walking_route_if_enabled(
     if not should_use_tmap_walking(distance_meters):
         return None
 
-    enabled = os.getenv("TMAP_WALKING_ENABLED", "false").lower() == "true"
+    enabled_override = os.getenv("TMAP_WALKING_ENABLED")
     app_key = os.getenv("SKT_API_KEY", "").strip()
+    enabled = bool(app_key)
+    if enabled_override is not None and enabled_override.strip():
+        enabled = enabled_override.lower() == "true"
     if not enabled or not app_key:
         logger.info(
             "transit tmap_skipped origin=%s destination=%s enabled=%s has_app_key=%s distance_meters=%s",
@@ -440,7 +443,7 @@ def find_tmap_walking_route_if_enabled(
     try:
         route = search_tmap_walking_route(origin, destination, app_key)
         logger.info(
-            "transit provider=TMAP_WALK origin=%s destination=%s total_seconds=%s distance_meters=%s coordinate_count=%s",
+            "transit provider=TMAP origin=%s destination=%s total_seconds=%s distance_meters=%s coordinate_count=%s",
             origin.name,
             destination.name,
             route.total_seconds,

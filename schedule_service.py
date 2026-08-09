@@ -39,6 +39,7 @@ try:
         ScheduleUpdateRequest,
         StopMarker,
     )
+    from transit_routing import TransitPoint, find_route
 except ModuleNotFoundError:  # pragma: no cover
     from data.runtime_env import load_runtime_env
     from data.place_experience import classify_place
@@ -65,6 +66,7 @@ except ModuleNotFoundError:  # pragma: no cover
         ScheduleUpdateRequest,
         StopMarker,
     )
+    from data.transit_routing import TransitPoint, find_route
 
 load_runtime_env()
 
@@ -517,51 +519,23 @@ def get_schedule_map(schedule_id: UUID, day_no: int | None) -> ScheduleMapRespon
                     latitude=stop.place.latitude,
                 )
             )
-            route_lines.append(
-                RouteLine(
-                    dayNo=day.day_no,
-                    routeOrder=index,
-                    lineOrder=1,
-                    mode="PLACEHOLDER",
-                    lineName="Migration Skeleton",
-                    startName=previous_name,
-                    endName=stop.place.name,
-                    durationMinutes=None,
-                    distanceMeters=None,
-                    instruction="Routing not yet migrated from Spring",
-                    fallbackUsed=True,
-                    coordinates=build_coordinates(
-                        previous_lon,
-                        previous_lat,
-                        stop.place.longitude,
-                        stop.place.latitude,
-                    ),
-                )
-            )
+            route_lines.extend(route_lines_for_transit(day.day_no, index, stop.inbound_transit, previous_name, stop.place.name, previous_lon, previous_lat, stop.place.longitude, stop.place.latitude))
             previous_name = stop.place.name
             previous_lon = stop.place.longitude
             previous_lat = stop.place.latitude
 
         if day.end_location and previous_name:
-            route_lines.append(
-                RouteLine(
-                    dayNo=day.day_no,
-                    routeOrder=len(day.stops) + 1,
-                    lineOrder=1,
-                    mode="PLACEHOLDER",
-                    lineName="Migration Skeleton",
-                    startName=previous_name,
-                    endName=day.end_location.name,
-                    durationMinutes=None,
-                    distanceMeters=None,
-                    instruction="Routing not yet migrated from Spring",
-                    fallbackUsed=True,
-                    coordinates=build_coordinates(
-                        previous_lon,
-                        previous_lat,
-                        day.end_location.longitude,
-                        day.end_location.latitude,
-                    ),
+            route_lines.extend(
+                route_lines_for_transit(
+                    day.day_no,
+                    len(day.stops) + 1,
+                    day.final_transit,
+                    previous_name,
+                    day.end_location.name,
+                    previous_lon,
+                    previous_lat,
+                    day.end_location.longitude,
+                    day.end_location.latitude,
                 )
             )
 
@@ -671,14 +645,15 @@ def build_stops(
 
     stops: list[ScheduleStop] = []
     for index, candidate in enumerate(candidates, start=1):
-        transit_minutes = estimate_transit_minutes(
-            previous_point.longitude,
-            previous_point.latitude,
-            candidate.longitude,
-            candidate.latitude,
-        ) if previous_point is not None else 0
-        inbound_transit = build_inbound_transit(previous_point.name if previous_point else None, candidate.name, transit_minutes)
-        cursor = cursor + timedelta(minutes=transit_minutes)
+        inbound_transit = None
+        if previous_point is not None:
+            inbound_transit = resolve_transit(
+                TransitPoint(previous_point.name, previous_point.longitude, previous_point.latitude),
+                TransitPoint(candidate.name, candidate.longitude, candidate.latitude),
+                "INBOUND",
+                index,
+            )
+            cursor = cursor + timedelta(minutes=inbound_transit.total_minutes)
         fixed_event = fixed_events_by_place.get(candidate.id)
         if fixed_event is not None:
             wait_minutes = max(0, int((fixed_event.starts_at - cursor).total_seconds() // 60))
@@ -785,13 +760,17 @@ def recalculate_day(day: ScheduleDay, stops: list[ScheduleStop]) -> ScheduleDay:
     remaining_stops = len(ordered)
     for stop in ordered:
         remaining_stops -= 1
-        transit_minutes = estimate_transit_minutes(
-            previous_lon,
-            previous_lat,
-            stop.place.longitude or previous_lon,
-            stop.place.latitude or previous_lat,
+        inbound_transit = resolve_transit(
+            TransitPoint(previous_name, previous_lon, previous_lat),
+            TransitPoint(
+                stop.place.name,
+                stop.place.longitude or previous_lon,
+                stop.place.latitude or previous_lat,
+            ),
+            "INBOUND",
+            stop.order,
         )
-        cursor = cursor + timedelta(minutes=transit_minutes)
+        cursor = cursor + timedelta(minutes=inbound_transit.total_minutes)
         meal_slot_code, wait_minutes, cursor = align_meal_arrival(
             cursor,
             CandidatePlace(
@@ -816,7 +795,7 @@ def recalculate_day(day: ScheduleDay, stops: list[ScheduleStop]) -> ScheduleDay:
         rebuilt_stop.arrive_at = cursor.time()
         rebuilt_stop.depart_at = depart_dt.time()
         rebuilt_stop.stay_minutes = int((depart_dt - cursor).total_seconds() // 60)
-        rebuilt_stop.inbound_transit = build_inbound_transit(previous_name, stop.place.name, transit_minutes)
+        rebuilt_stop.inbound_transit = inbound_transit
         rebuilt_stop.meal_time_slot = meal_slot_code
         rebuilt_stop.waiting_minutes_before = wait_minutes
         rebuilt_stop.warnings = dedupe_warnings(
@@ -1071,18 +1050,12 @@ def build_final_transit(planned_day: PlannedDay, stops: list[ScheduleStop]) -> S
         origin_name = planned_day.start_location.name
         origin_lon = planned_day.start_location.longitude
         origin_lat = planned_day.start_location.latitude
-    minutes = estimate_transit_minutes(
-        origin_lon,
-        origin_lat,
-        planned_day.end_location.longitude,
-        planned_day.end_location.latitude,
+    return resolve_transit(
+        TransitPoint(origin_name, origin_lon, origin_lat),
+        TransitPoint(planned_day.end_location.name, planned_day.end_location.longitude, planned_day.end_location.latitude),
+        "FINAL",
+        len(stops) + 1,
     )
-    transit = build_inbound_transit(origin_name, planned_day.end_location.name, minutes)
-    if transit is None:
-        return None
-    transit.route_type = "FINAL"
-    transit.route_order = len(stops) + 1
-    return transit
 
 
 def max_time(left: time, right: time) -> time:
@@ -1123,6 +1096,113 @@ def build_coordinates(
 
 def dedupe_warnings(warnings: list[str]) -> list[str]:
     return list(dict.fromkeys(warnings))
+
+
+def resolve_transit(
+    origin: TransitPoint,
+    destination: TransitPoint,
+    route_type: str,
+    route_order: int,
+) -> ScheduleTransit:
+    try:
+        transit, _ = find_route(origin, destination, route_type, route_order)
+        return transit
+    except Exception:
+        minutes = estimate_transit_minutes(
+            origin.longitude,
+            origin.latitude,
+            destination.longitude,
+            destination.latitude,
+        )
+        fallback = build_inbound_transit(origin.name, destination.name, minutes)
+        if fallback is None:
+            raise
+        fallback.route_type = route_type
+        fallback.route_order = route_order
+        return fallback
+
+
+def route_lines_for_transit(
+    day_no: int,
+    route_order: int,
+    transit: ScheduleTransit | None,
+    start_name: str | None,
+    end_name: str | None,
+    start_lon: Decimal | None,
+    start_lat: Decimal | None,
+    end_lon: Decimal | None,
+    end_lat: Decimal | None,
+) -> list[RouteLine]:
+    if transit is None:
+        return [
+            RouteLine(
+                dayNo=day_no,
+                routeOrder=route_order,
+                lineOrder=1,
+                mode="PLACEHOLDER",
+                lineName="Migration Skeleton",
+                startName=start_name,
+                endName=end_name,
+                durationMinutes=None,
+                distanceMeters=None,
+                instruction="Routing not yet migrated from Spring",
+                fallbackUsed=True,
+                coordinates=build_coordinates(start_lon, start_lat, end_lon, end_lat),
+            )
+        ]
+    route_lines = getattr(transit, "route_lines", None)
+    if route_lines:
+        output: list[RouteLine] = []
+        for index, line in enumerate(route_lines, start=1):
+            payload = dict(line)
+            payload["dayNo"] = day_no
+            payload["routeOrder"] = route_order
+            payload["lineOrder"] = index
+            output.append(RouteLine.model_validate(payload))
+        return output
+    if transit.segments:
+        lines: list[RouteLine] = []
+        current_start = [start_lon, start_lat]
+        for index, segment in enumerate(transit.segments, start=1):
+            coordinates = build_coordinates(
+                current_start[0],
+                current_start[1],
+                end_lon if index == len(transit.segments) else current_start[0],
+                end_lat if index == len(transit.segments) else current_start[1],
+            )
+            lines.append(
+                RouteLine(
+                    dayNo=day_no,
+                    routeOrder=route_order,
+                    lineOrder=index,
+                    mode=segment.mode,
+                    lineName=segment.line_name,
+                    startName=segment.start_station_name or start_name,
+                    endName=segment.end_station_name or end_name,
+                    durationMinutes=segment.duration_minutes,
+                    distanceMeters=segment.distance_meters,
+                    instruction=segment.instruction,
+                    fallbackUsed=transit.fallback_used,
+                    coordinates=coordinates,
+                )
+            )
+        return lines
+    return [
+        RouteLine(
+            dayNo=day_no,
+            routeOrder=route_order,
+            lineOrder=1,
+            mode=transit.route_type or "PLACEHOLDER",
+            lineName=transit.summary,
+            startName=start_name,
+            endName=end_name,
+            durationMinutes=transit.total_minutes,
+            distanceMeters=None,
+            instruction=transit.summary,
+            fallbackUsed=transit.fallback_used,
+            coordinates=build_coordinates(start_lon, start_lat, end_lon, end_lat),
+        )
+    ]
 
 
 def resolve_route_coverage(days: list[ScheduleDay]) -> str:

@@ -189,6 +189,7 @@ class ScheduleTransit(BaseModel):
     fallback_used: bool = Field(default=True, alias="fallbackUsed")
     segments: list[ScheduleSegment] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    route_lines: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
 
 
 class ScheduleStop(BaseModel):

@@ -460,27 +460,39 @@ def save_transit(cur, day: ScheduleDay, stop: ScheduleStop | None, transit: Sche
                 "realtime_status": segment.realtime_status,
             },
         )
-    cur.execute(
-        """
-        INSERT INTO transit_route_lines (
-            id, transit_route_id, line_order, mode, line_name, coordinates_json, duration_minutes, distance_meters, instruction, fallback_used
-        ) VALUES (
-            gen_random_uuid(), %(transit_route_id)s, %(line_order)s, %(mode)s, %(line_name)s, %(coordinates_json)s, %(duration_minutes)s,
-            %(distance_meters)s, %(instruction)s, %(fallback_used)s
-        )
-        """,
+    route_lines = transit.route_lines or [
         {
-            "transit_route_id": route_id,
-            "line_order": 1,
             "mode": transit.route_type or ("FINAL" if stop is None else "INBOUND"),
-            "line_name": transit.summary or transit.destination_name,
-            "coordinates_json": "[]",
-            "duration_minutes": transit.total_minutes,
-            "distance_meters": None,
+            "lineName": transit.summary or transit.destination_name,
+            "coordinates": [],
+            "durationMinutes": transit.total_minutes,
+            "distanceMeters": None,
             "instruction": transit.summary,
-            "fallback_used": transit.fallback_used,
-        },
-    )
+            "fallbackUsed": transit.fallback_used,
+        }
+    ]
+    for index, line in enumerate(route_lines, start=1):
+        cur.execute(
+            """
+            INSERT INTO transit_route_lines (
+                id, transit_route_id, line_order, mode, line_name, coordinates_json, duration_minutes, distance_meters, instruction, fallback_used
+            ) VALUES (
+                gen_random_uuid(), %(transit_route_id)s, %(line_order)s, %(mode)s, %(line_name)s, %(coordinates_json)s, %(duration_minutes)s,
+                %(distance_meters)s, %(instruction)s, %(fallback_used)s
+            )
+            """,
+            {
+                "transit_route_id": route_id,
+                "line_order": index,
+                "mode": line.get("mode"),
+                "line_name": line.get("lineName"),
+                "coordinates_json": json.dumps(line.get("coordinates", []), ensure_ascii=False),
+                "duration_minutes": line.get("durationMinutes"),
+                "distance_meters": line.get("distanceMeters"),
+                "instruction": line.get("instruction"),
+                "fallback_used": bool(line.get("fallbackUsed", False)),
+            },
+        )
 
 
 def load_schedule(schedule_id: UUID) -> ScheduleResponse:
@@ -660,6 +672,23 @@ def route_to_model(row: dict[str, Any] | None) -> ScheduleTransit | None:
         for segment in row.get("segments", [])
     ]
     raw = json.loads(row["raw_json"]) if row.get("raw_json") else {}
+    route_lines = [
+        {
+            "dayNo": 0,
+            "routeOrder": row["route_order"],
+            "lineOrder": line["line_order"],
+            "mode": line["mode"],
+            "lineName": line["line_name"],
+            "startName": None,
+            "endName": None,
+            "durationMinutes": line["duration_minutes"],
+            "distanceMeters": line["distance_meters"],
+            "instruction": line["instruction"],
+            "fallbackUsed": line["fallback_used"],
+            "coordinates": json.loads(line["coordinates_json"] or "[]"),
+        }
+        for line in row.get("lines", [])
+    ]
     return ScheduleTransit.model_validate(
         {
             "routeType": row["route_type"],
@@ -679,6 +708,7 @@ def route_to_model(row: dict[str, Any] | None) -> ScheduleTransit | None:
             "fallbackUsed": row["fallback_used"],
             "segments": [dump_model(segment) for segment in segments],
             "warnings": json.loads(row["warnings_json"] or "[]"),
+            "route_lines": route_lines,
         }
     )
 

@@ -8,6 +8,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Lock
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -200,9 +201,10 @@ def load_candidate_places_from_db() -> list[CandidatePlace]:
         "conninfo": dsn,
         "autocommit": True,
     }
-    if username and "@" not in dsn:
+    parsed_dsn = urlsplit(dsn)
+    if username and parsed_dsn.username is None:
         connect_kwargs["user"] = username
-    if password and ":" not in dsn.split("@", 1)[0]:
+    if password and parsed_dsn.password is None:
         connect_kwargs["password"] = password
 
     query = """

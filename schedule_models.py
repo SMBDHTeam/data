@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, time
+import datetime as dt
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -204,6 +205,8 @@ class ScheduleStop(BaseModel):
     waiting_minutes_before: int = Field(default=0, alias="waitingMinutesBefore")
     selection_reasons: list[str] = Field(default_factory=list, alias="selectionReasons")
     warnings: list[str] = Field(default_factory=list)
+    fixed_starts_at: datetime | None = Field(default=None, alias="fixedStartsAt")
+    fixed_ends_at: datetime | None = Field(default=None, alias="fixedEndsAt")
 
 
 class DayLocation(BaseModel):
@@ -310,3 +313,199 @@ class ScheduleMapResponse(BaseModel):
     end_marker: MapMarker | None = Field(default=None, alias="endMarker")
     markers: list[StopMarker] = Field(default_factory=list)
     route_lines: list[RouteLine] = Field(default_factory=list, alias="routeLines")
+
+
+class PreviewLocation(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    name: str
+    address: str | None = None
+    longitude: Decimal
+    latitude: Decimal
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("name must not be blank")
+        return value
+
+
+class PreviewLodgingNightStay(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    date: date
+    location: PreviewLocation
+
+
+class PreviewLodgingPlan(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    mode: str
+    base_location: PreviewLocation | None = Field(default=None, alias="baseLocation")
+    night_stays: list[PreviewLodgingNightStay] = Field(default_factory=list, alias="nightStays")
+
+
+class PreviewEndConstraint(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    type: str
+    location: PreviewLocation
+    target_at: str = Field(alias="targetAt")
+    buffer_minutes: int | None = Field(default=None, alias="bufferMinutes")
+
+
+class PreviewSelectedAnswer(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    question_id: str = Field(alias="questionId")
+    answer_ids: list[str] = Field(alias="answerIds")
+
+    @model_validator(mode="after")
+    def validate_answer_ids(self) -> "PreviewSelectedAnswer":
+        if not self.answer_ids:
+            raise ValueError("answerIds must not be empty")
+        self.answer_ids = [answer_id.strip() for answer_id in self.answer_ids if answer_id.strip()]
+        if not self.answer_ids:
+            raise ValueError("answerIds must not be empty")
+        return self
+
+
+class PreviewFixedEvent(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    client_event_id: str = Field(alias="clientEventId")
+    name: str
+    place_id: int = Field(alias="placeId")
+    starts_at: str = Field(alias="startsAt")
+    ends_at: str = Field(alias="endsAt")
+
+
+class PreviewDayOverride(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    date: date
+    available_from: time | None = Field(default=None, alias="availableFrom")
+    available_until: time | None = Field(default=None, alias="availableUntil")
+    start_location: PreviewLocation | None = Field(default=None, alias="startLocation")
+    end_location: PreviewLocation | None = Field(default=None, alias="endLocation")
+
+
+class SchedulePreviewCreateRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=(), populate_by_name=True)
+
+    start_date: date = Field(alias="startDate")
+    end_date: date = Field(alias="endDate")
+    start_location: PreviewLocation = Field(alias="startLocation")
+    start_time: time | None = Field(default=None, alias="startTime")
+    lodging_plan: PreviewLodgingPlan = Field(alias="lodgingPlan")
+    end_constraint: PreviewEndConstraint | None = Field(default=None, alias="endConstraint")
+    selected_answers: list[PreviewSelectedAnswer] = Field(alias="selectedAnswers")
+    must_visit_place_ids: list[int] = Field(default_factory=list, alias="mustVisitPlaceIds")
+    fixed_events: list[PreviewFixedEvent] = Field(default_factory=list, alias="fixedEvents")
+    day_overrides: list[PreviewDayOverride] = Field(default_factory=list, alias="dayOverrides")
+    custom_prompt: str | None = Field(default=None, alias="customPrompt")
+    time_zone: str | None = Field(default=None, alias="timeZone")
+
+    @model_validator(mode="after")
+    def validate_preview_request(self) -> "SchedulePreviewCreateRequest":
+        if self.end_date < self.start_date:
+            raise ValueError("endDate must be on or after startDate")
+        if not self.selected_answers:
+            raise ValueError("selectedAnswers must not be empty")
+        if any(place_id <= 0 for place_id in self.must_visit_place_ids):
+            raise ValueError("mustVisitPlaceIds must contain only positive integers")
+        return self
+
+
+class SchedulePreviewScheduleRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    preview_id: UUID = Field(alias="previewId")
+
+
+class SchedulePreviewLocationResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    name: str
+    address: str | None = None
+    longitude: Decimal
+    latitude: Decimal
+
+
+class ResolvedDay(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    date: date
+    available_from: time = Field(alias="availableFrom")
+    available_until: time = Field(alias="availableUntil")
+    start_location: SchedulePreviewLocationResponse = Field(alias="startLocation")
+    end_location: SchedulePreviewLocationResponse = Field(alias="endLocation")
+    start_location_source: str = Field(alias="startLocationSource")
+    end_location_source: str = Field(alias="endLocationSource")
+
+
+class ResolvedEndConstraint(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    type: str
+    target_at: str = Field(alias="targetAt")
+    applied_buffer_minutes: int = Field(alias="appliedBufferMinutes")
+    available_until: time = Field(alias="availableUntil")
+
+
+class AppliedDefault(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    field_path: str = Field(alias="fieldPath")
+    resolved_value: Any = Field(alias="resolvedValue")
+    reason_code: str = Field(alias="reasonCode")
+
+
+class InterpretedPrompt(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    preferences: list[str] = Field(default_factory=list)
+    unrecognized_texts: list[str] = Field(default_factory=list, alias="unrecognizedTexts")
+    source: str = "RULE_BASED"
+    confidence: int = 100
+
+
+class PreviewWarning(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    code: str
+    date: dt.date | None = None
+    message: str
+
+
+class PreviewConflict(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    code: str
+    message: str
+    field_path: str | None = Field(default=None, alias="fieldPath")
+    conflict_date: dt.date | None = Field(default=None, alias="conflictDate")
+    required_minutes: int | None = Field(default=None, alias="requiredMinutes")
+    available_minutes: int | None = Field(default=None, alias="availableMinutes")
+    adjustable_fields: list[str] = Field(default_factory=list, alias="adjustableFields")
+
+
+class SchedulePreviewResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    preview_id: UUID = Field(alias="previewId")
+    status: str
+    can_generate: bool = Field(alias="canGenerate")
+    expires_at: datetime = Field(alias="expiresAt")
+    time_zone: str = Field(alias="timeZone")
+    lodging_mode: str = Field(alias="lodgingMode")
+    route_coverage: str = Field(alias="routeCoverage")
+    resolved_days: list[ResolvedDay] = Field(default_factory=list, alias="resolvedDays")
+    resolved_end_constraint: ResolvedEndConstraint | None = Field(default=None, alias="resolvedEndConstraint")
+    applied_defaults: list[AppliedDefault] = Field(default_factory=list, alias="appliedDefaults")
+    interpreted_prompt: InterpretedPrompt = Field(alias="interpretedPrompt")
+    warnings: list[PreviewWarning] = Field(default_factory=list)
+    conflicts: list[PreviewConflict] = Field(default_factory=list)
+    schedule_id: UUID | None = Field(default=None, alias="scheduleId")

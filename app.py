@@ -7,7 +7,7 @@ from uuid import UUID
 import joblib
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 try:
@@ -23,8 +23,17 @@ try:
         ScheduleCreateRequest,
         ScheduleListResponse,
         ScheduleMapResponse,
+        SchedulePreviewCreateRequest,
+        SchedulePreviewResponse,
+        SchedulePreviewScheduleRequest,
         ScheduleResponse,
         ScheduleUpdateRequest,
+    )
+    from schedule_preview_service import (
+        attach_schedule_to_preview,
+        consume_preview,
+        create_preview,
+        get_preview,
     )
     from schedule_service import (
         CANDIDATE_POOL,
@@ -41,8 +50,17 @@ except ModuleNotFoundError:  # pragma: no cover
         ScheduleCreateRequest,
         ScheduleListResponse,
         ScheduleMapResponse,
+        SchedulePreviewCreateRequest,
+        SchedulePreviewResponse,
+        SchedulePreviewScheduleRequest,
         ScheduleResponse,
         ScheduleUpdateRequest,
+    )
+    from data.schedule_preview_service import (
+        attach_schedule_to_preview,
+        consume_preview,
+        create_preview,
+        get_preview,
     )
     from data.schedule_service import (
         CANDIDATE_POOL,
@@ -439,8 +457,35 @@ def predict_batch(payloads: list[PredictRequest]) -> list[PredictResponse]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/v1/schedule-previews", response_model=SchedulePreviewResponse, status_code=201)
+def create_schedule_preview_endpoint(payload: SchedulePreviewCreateRequest) -> SchedulePreviewResponse:
+    return create_preview(payload)
+
+
+@app.get("/api/v1/schedule-previews/{preview_id}", response_model=SchedulePreviewResponse)
+def get_schedule_preview_endpoint(preview_id: UUID) -> SchedulePreviewResponse:
+    return get_preview(preview_id)
+
+
 @app.post("/api/v1/schedules", response_model=ScheduleResponse, status_code=201)
-def create_schedule_endpoint(payload: ScheduleCreateRequest) -> ScheduleResponse:
+def create_schedule_endpoint(
+    payload: ScheduleCreateRequest | SchedulePreviewScheduleRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ScheduleResponse:
+    if idempotency_key:
+        if not isinstance(payload, SchedulePreviewScheduleRequest):
+            payload = SchedulePreviewScheduleRequest.model_validate(payload.model_dump(by_alias=True))
+        preview, create_request, fixed_events_by_day = consume_preview(payload)
+        schedule = create_schedule(
+            create_request,
+            preview_id=preview.preview_id,
+            fixed_events_by_day=fixed_events_by_day,
+        )
+        attach_schedule_to_preview(preview.preview_id, schedule.id)
+        return schedule
+
+    if not isinstance(payload, ScheduleCreateRequest):
+        payload = ScheduleCreateRequest.model_validate(payload.model_dump(by_alias=True))
     return create_schedule(payload)
 
 

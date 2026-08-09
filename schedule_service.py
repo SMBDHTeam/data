@@ -16,6 +16,12 @@ from fastapi import HTTPException
 try:
     from runtime_env import load_runtime_env
     from place_experience import classify_place
+    from schedule_persistence import (
+        db_enabled,
+        list_schedules as list_schedules_from_db,
+        load_schedule as load_schedule_from_db,
+        save_schedule as save_schedule_to_db,
+    )
     from schedule_models import (
         DayLocation,
         MapMarker,
@@ -36,6 +42,12 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     from data.runtime_env import load_runtime_env
     from data.place_experience import classify_place
+    from data.schedule_persistence import (
+        db_enabled,
+        list_schedules as list_schedules_from_db,
+        load_schedule as load_schedule_from_db,
+        save_schedule as save_schedule_to_db,
+    )
     from data.schedule_models import (
         DayLocation,
         MapMarker,
@@ -143,6 +155,14 @@ class MealSlot:
     code: str
     start: time
     end: time
+
+
+@dataclass(frozen=True)
+class FixedEventSpec:
+    place_id: int
+    name: str
+    starts_at: datetime
+    ends_at: datetime
 
 
 DEFAULT_CANDIDATES = [
@@ -322,7 +342,11 @@ class ScheduleStore:
 STORE = ScheduleStore()
 
 
-def create_schedule(request: ScheduleCreateRequest) -> ScheduleResponse:
+def create_schedule(
+    request: ScheduleCreateRequest,
+    preview_id: UUID | None = None,
+    fixed_events_by_day: dict[int, list[FixedEventSpec]] | None = None,
+) -> ScheduleResponse:
     planned_days = plan_days(request)
     places_by_day = distribute_must_visit_places(planned_days, request.must_visit_place_ids)
     target_counts = target_stop_counts(planned_days, request)
@@ -330,7 +354,13 @@ def create_schedule(request: ScheduleCreateRequest) -> ScheduleResponse:
     for planned_day in planned_days:
         day_place_ids = places_by_day.get(planned_day.day_no, [])
         target_count = max(len(day_place_ids), target_counts.get(planned_day.day_no, 1))
-        stops = build_stops(planned_day, day_place_ids, target_count, request)
+        stops = build_stops(
+            planned_day,
+            day_place_ids,
+            target_count,
+            request,
+            fixed_events_by_day.get(planned_day.day_no, []) if fixed_events_by_day else [],
+        )
         days.append(
             ScheduleDay(
                 dayNo=planned_day.day_no,
@@ -343,9 +373,11 @@ def create_schedule(request: ScheduleCreateRequest) -> ScheduleResponse:
                 endLocationSource="REQUEST",
                 summary=build_day_summary(planned_day, stops),
                 stops=stops,
-                finalTransit=None,
+                finalTransit=build_final_transit(planned_day, stops),
             )
         )
+
+    days, repair_warnings = repair_schedule_days(planned_days, days, target_counts)
 
     schedule = ScheduleResponse(
         id=uuid4(),
@@ -357,17 +389,40 @@ def create_schedule(request: ScheduleCreateRequest) -> ScheduleResponse:
         styleSummary=build_style_summary(request),
         days=days,
         evaluation=None,
-        previewId=None,
-        planningAssumptions=PlanningAssumptions(warnings=MIGRATION_WARNINGS),
+        previewId=preview_id,
+        planningAssumptions=PlanningAssumptions(
+            routeCoverage=resolve_route_coverage(days),
+            warnings=dedupe_warnings(
+                MIGRATION_WARNINGS
+                + (["FIXED_EVENT_APPLIED_WITH_FASTAPI_HEURISTICS"] if fixed_events_by_day else [])
+                + repair_warnings
+            )
+        ),
     )
-    return STORE.save(schedule)
+    saved = STORE.save(schedule)
+    if db_enabled():
+        try:
+            save_schedule_to_db(saved, condition_request=request)
+        except Exception:
+            pass
+    return saved
 
 
 def list_schedules() -> ScheduleListResponse:
+    if db_enabled():
+        try:
+            return list_schedules_from_db()
+        except Exception:
+            pass
     return STORE.list()
 
 
 def get_schedule(schedule_id: UUID) -> ScheduleResponse:
+    if db_enabled():
+        try:
+            return load_schedule_from_db(schedule_id)
+        except Exception:
+            pass
     return STORE.get(schedule_id)
 
 
@@ -416,14 +471,23 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
     updated_days: list[ScheduleDay] = []
     for day_no, day in sorted(days_by_no.items()):
         day_stops = sorted(grouped_stops.get(day_no, day.stops), key=lambda stop: stop.order)
-        updated_days.append(recalculate_day(day, day_stops))
+        recalculated = recalculate_day(day, day_stops)
+        recalculated.final_transit = build_final_transit(planned_day_from_schedule_day(recalculated), recalculated.stops)
+        updated_days.append(recalculated)
 
     updated_schedule = existing.model_copy(deep=True)
     updated_schedule.days = updated_days
     updated_schedule.planning_assumptions = PlanningAssumptions(
+        routeCoverage=resolve_route_coverage(updated_days),
         warnings=dedupe_warnings(MIGRATION_WARNINGS + ["UPDATE_APPLIED_WITHOUT_ROUTE_REBUILD"])
     )
-    return STORE.save(updated_schedule)
+    saved = STORE.save(updated_schedule)
+    if db_enabled():
+        try:
+            save_schedule_to_db(saved, condition_request=request_context_from_schedule(saved))
+        except Exception:
+            pass
+    return saved
 
 
 def get_schedule_map(schedule_id: UUID, day_no: int | None) -> ScheduleMapResponse:
@@ -586,11 +650,15 @@ def build_stops(
     place_ids: list[int],
     target_count: int,
     request: ScheduleCreateRequest,
+    fixed_events: list[FixedEventSpec],
 ) -> list[ScheduleStop]:
-    candidates = choose_candidate_places(planned_day, request, target_count, place_ids)
+    fixed_event_place_ids = [event.place_id for event in fixed_events]
+    must_visit_ids = dedupe_ints(place_ids + fixed_event_place_ids)
+    effective_target_count = max(target_count, len(must_visit_ids))
+    candidates = choose_candidate_places(planned_day, request, effective_target_count, must_visit_ids)
     if not candidates:
         return []
-    candidates = order_candidates_for_day(planned_day, candidates)
+    candidates = order_candidates_for_day(planned_day, candidates, fixed_events)
 
     start_dt = datetime.combine(planned_day.date, planned_day.start_time)
     end_dt = datetime.combine(planned_day.date, planned_day.end_time)
@@ -599,6 +667,7 @@ def build_stops(
     assigned_slots: set[str] = set()
     previous_point = planned_day.start_location
     cursor = start_dt
+    fixed_events_by_place = {event.place_id: event for event in fixed_events}
 
     stops: list[ScheduleStop] = []
     for index, candidate in enumerate(candidates, start=1):
@@ -610,31 +679,47 @@ def build_stops(
         ) if previous_point is not None else 0
         inbound_transit = build_inbound_transit(previous_point.name if previous_point else None, candidate.name, transit_minutes)
         cursor = cursor + timedelta(minutes=transit_minutes)
-        meal_slot_code, wait_minutes, cursor = align_meal_arrival(cursor, candidate, active_slots, assigned_slots)
-        if meal_slot_code is not None:
-            assigned_slots.add(meal_slot_code)
-        stay_minutes = visit_duration_minutes(candidate)
-        remaining_count = len(candidates) - index
-        latest_departure = end_dt - timedelta(minutes=remaining_count * MIN_STAY_MINUTES)
-        depart_dt = min(cursor + timedelta(minutes=stay_minutes), latest_departure if latest_departure > cursor else end_dt)
-        if depart_dt <= cursor:
-            depart_dt = min(end_dt, cursor + timedelta(minutes=MIN_STAY_MINUTES))
+        fixed_event = fixed_events_by_place.get(candidate.id)
+        if fixed_event is not None:
+            wait_minutes = max(0, int((fixed_event.starts_at - cursor).total_seconds() // 60))
+            meal_slot_code = None
+            stay_minutes = int((fixed_event.ends_at - fixed_event.starts_at).total_seconds() // 60)
+            arrive_dt = fixed_event.starts_at
+            depart_dt = fixed_event.ends_at
+        else:
+            meal_slot_code, wait_minutes, cursor = align_meal_arrival(cursor, candidate, active_slots, assigned_slots)
+            if meal_slot_code is not None:
+                assigned_slots.add(meal_slot_code)
+            stay_minutes = visit_duration_minutes(candidate)
+            remaining_count = len(candidates) - index
+            latest_departure = end_dt - timedelta(minutes=remaining_count * MIN_STAY_MINUTES)
+            depart_dt = min(cursor + timedelta(minutes=stay_minutes), latest_departure if latest_departure > cursor else end_dt)
+            if depart_dt <= cursor:
+                depart_dt = min(end_dt, cursor + timedelta(minutes=MIN_STAY_MINUTES))
+            arrive_dt = cursor
         stops.append(
             candidate_stop(
                 order=index,
-                stay_minutes=max(MIN_STAY_MINUTES, int((depart_dt - cursor).total_seconds() // 60)),
+                stay_minutes=max(MIN_STAY_MINUTES, int((depart_dt - arrive_dt).total_seconds() // 60)),
                 candidate=candidate,
-                selection_reasons=selection_reasons(candidate.id if candidate.id in place_ids else None, theme_answer_id, request),
-                arrive_at=cursor.time(),
+                selection_reasons=selection_reasons(
+                    candidate.id if candidate.id in must_visit_ids else None,
+                    theme_answer_id,
+                    request,
+                    fixed_event is not None,
+                ),
+                arrive_at=arrive_dt.time(),
                 depart_at=depart_dt.time(),
                 inbound_transit=inbound_transit,
                 meal_time_slot=meal_slot_code,
                 waiting_minutes_before=wait_minutes,
+                fixed_starts_at=fixed_event.starts_at if fixed_event is not None else None,
+                fixed_ends_at=fixed_event.ends_at if fixed_event is not None else None,
             )
         )
         previous_point = ScheduleLocation(name=candidate.name, longitude=candidate.longitude, latitude=candidate.latitude)
         cursor = depart_dt
-    return stops
+    return trim_or_extend_stops_to_feasible_window(planned_day, stops)
 
 
 def candidate_stop(
@@ -647,6 +732,8 @@ def candidate_stop(
     inbound_transit: ScheduleTransit | None = None,
     meal_time_slot: str | None = None,
     waiting_minutes_before: int = 0,
+    fixed_starts_at: datetime | None = None,
+    fixed_ends_at: datetime | None = None,
 ) -> ScheduleStop:
     return ScheduleStop(
         id=uuid4(),
@@ -669,6 +756,8 @@ def candidate_stop(
         mealTimeSlot=meal_time_slot,
         waitingMinutesBefore=waiting_minutes_before,
         selectionReasons=selection_reasons,
+        fixedStartsAt=fixed_starts_at,
+        fixedEndsAt=fixed_ends_at,
         warnings=[
             "PLACE_POOL_LIMITED_TO_FASTAPI_SEED_DATA",
         ],
@@ -741,6 +830,7 @@ def recalculate_day(day: ScheduleDay, stops: list[ScheduleStop]) -> ScheduleDay:
         cursor = depart_dt
     recalculated.stops = rebuilt
     recalculated.summary = build_stop_summary(rebuilt)
+    recalculated.final_transit = build_final_transit(planned_day_from_schedule_day(recalculated), rebuilt)
     return recalculated
 
 
@@ -774,9 +864,26 @@ def build_stop_summary(stops: list[ScheduleStop]) -> str:
     return f"{len(stops)}개 방문지 skeleton 일정"
 
 
-def order_candidates_for_day(planned_day: PlannedDay, candidates: list[CandidatePlace]) -> list[CandidatePlace]:
+def order_candidates_for_day(
+    planned_day: PlannedDay,
+    candidates: list[CandidatePlace],
+    fixed_events: list[FixedEventSpec] | None = None,
+) -> list[CandidatePlace]:
     if len(candidates) <= 1:
         return candidates
+    fixed_event_positions = {
+        event.place_id: event.starts_at
+        for event in (fixed_events or [])
+    }
+    if fixed_event_positions:
+        fixed_candidates = [candidate for candidate in candidates if candidate.id in fixed_event_positions]
+        flexible_candidates = [candidate for candidate in candidates if candidate.id not in fixed_event_positions]
+        ordered_flexible = order_candidates_for_day(planned_day, flexible_candidates, [])
+        merged = ordered_flexible[:]
+        for candidate in sorted(fixed_candidates, key=lambda item: fixed_event_positions[item.id]):
+            insert_at = min(len(merged), max(0, len(merged) // 2))
+            merged.insert(insert_at, candidate)
+        return merged[: len(candidates)]
     meal_candidates = [candidate for candidate in candidates if is_meal_candidate(candidate)]
     other_candidates = [candidate for candidate in candidates if not is_meal_candidate(candidate)]
     ordered_non_meals = nearest_neighbor_order(
@@ -952,6 +1059,32 @@ def build_inbound_transit(origin_name: str | None, destination_name: str, transi
     )
 
 
+def build_final_transit(planned_day: PlannedDay, stops: list[ScheduleStop]) -> ScheduleTransit | None:
+    if planned_day.end_location is None:
+        return None
+    if stops:
+        origin = stops[-1].place
+        origin_name = origin.name
+        origin_lon = origin.longitude or planned_day.start_location.longitude
+        origin_lat = origin.latitude or planned_day.start_location.latitude
+    else:
+        origin_name = planned_day.start_location.name
+        origin_lon = planned_day.start_location.longitude
+        origin_lat = planned_day.start_location.latitude
+    minutes = estimate_transit_minutes(
+        origin_lon,
+        origin_lat,
+        planned_day.end_location.longitude,
+        planned_day.end_location.latitude,
+    )
+    transit = build_inbound_transit(origin_name, planned_day.end_location.name, minutes)
+    if transit is None:
+        return None
+    transit.route_type = "FINAL"
+    transit.route_order = len(stops) + 1
+    return transit
+
+
 def max_time(left: time, right: time) -> time:
     return left if left >= right else right
 
@@ -990,6 +1123,12 @@ def build_coordinates(
 
 def dedupe_warnings(warnings: list[str]) -> list[str]:
     return list(dict.fromkeys(warnings))
+
+
+def resolve_route_coverage(days: list[ScheduleDay]) -> str:
+    if any(day.final_transit is None for day in days):
+        return "SKELETON_ONLY"
+    return "ATTRACTION_ROUTES_ONLY"
 
 
 def planned_day_from_schedule_day(day: ScheduleDay) -> PlannedDay:
@@ -1104,12 +1243,15 @@ def selection_reasons(
     place_id: int | None,
     theme_answer_id: str | None,
     request: ScheduleCreateRequest,
+    is_fixed_event: bool = False,
 ) -> list[str]:
     reasons: list[str] = []
     if place_id is not None:
         reasons.append("must_visit_seed")
     else:
         reasons.append("daily_target_fill")
+    if is_fixed_event:
+        reasons.append("fixed_event")
     if theme_answer_id is not None:
         reasons.append(f"theme:{theme_answer_id}")
     if has_answer(request, "PACE_PACKED"):
@@ -1229,6 +1371,129 @@ def fallback_candidate_for_unknown_id(
         1,
         2,
     )
+
+
+def trim_or_extend_stops_to_feasible_window(
+    planned_day: PlannedDay,
+    stops: list[ScheduleStop],
+) -> list[ScheduleStop]:
+    if not stops:
+        return stops
+    start_dt = datetime.combine(planned_day.date, planned_day.start_time)
+    end_dt = datetime.combine(planned_day.date, planned_day.end_time)
+    total_minutes = 0
+    for stop in stops:
+        total_minutes += stop.stay_minutes + (stop.inbound_transit.total_minutes if stop.inbound_transit else 0)
+        total_minutes += stop.waiting_minutes_before
+    available_minutes = int((end_dt - start_dt).total_seconds() // 60)
+    if total_minutes <= available_minutes:
+        return stops
+
+    overrun = total_minutes - available_minutes
+    adjusted = [stop.model_copy(deep=True) for stop in stops]
+    for stop in reversed(adjusted):
+        if overrun <= 0:
+            break
+        if stop.fixed_starts_at is not None:
+            continue
+        reducible = max(0, stop.stay_minutes - MIN_STAY_MINUTES)
+        reduction = min(reducible, overrun)
+        if reduction > 0:
+            stop.stay_minutes -= reduction
+            if stop.depart_at and stop.arrive_at:
+                arrive_dt = datetime.combine(planned_day.date, stop.arrive_at)
+                stop.depart_at = (arrive_dt + timedelta(minutes=stop.stay_minutes)).time()
+            stop.warnings = dedupe_warnings(stop.warnings + ["STAY_REDUCED_FOR_FEASIBILITY"])
+            overrun -= reduction
+    return adjusted
+
+
+def dedupe_ints(values: list[int]) -> list[int]:
+    return list(dict.fromkeys(values))
+
+
+def repair_schedule_days(
+    planned_days: list[PlannedDay],
+    days: list[ScheduleDay],
+    target_counts: dict[int, int],
+) -> tuple[list[ScheduleDay], list[str]]:
+    repaired = [day.model_copy(deep=True) for day in days]
+    warnings: list[str] = []
+    changed = True
+    while changed:
+        changed = False
+        for index, day in enumerate(repaired):
+            overrun = day_overrun_minutes(day)
+            if overrun <= 0:
+                continue
+            repaired_day = recalculate_day(day, day.stops)
+            if day_overrun_minutes(repaired_day) <= 0:
+                repaired[index] = repaired_day
+                warnings.append("STAY_DURATION_REPAIR_APPLIED")
+                changed = True
+                continue
+            moved = move_last_optional_stop(
+                repaired,
+                index,
+                planned_days,
+                target_counts,
+            )
+            if moved:
+                warnings.append("CROSS_DAY_MOVE_REPAIR_APPLIED")
+                changed = True
+    for index, day in enumerate(repaired):
+        repaired[index] = recalculate_day(day, day.stops)
+    return repaired, dedupe_warnings(warnings)
+
+
+def day_overrun_minutes(day: ScheduleDay) -> int:
+    if not day.start_time or not day.end_time:
+        return 0
+    available = int(
+        (
+            datetime.combine(day.date, day.end_time)
+            - datetime.combine(day.date, day.start_time)
+        ).total_seconds() // 60
+    )
+    planned = sum(
+        stop.stay_minutes
+        + stop.waiting_minutes_before
+        + (stop.inbound_transit.total_minutes if stop.inbound_transit else 0)
+        for stop in day.stops
+    )
+    if day.final_transit is not None:
+        planned += day.final_transit.total_minutes
+    return max(0, planned - available)
+
+
+def move_last_optional_stop(
+    repaired: list[ScheduleDay],
+    source_index: int,
+    planned_days: list[PlannedDay],
+    target_counts: dict[int, int],
+) -> bool:
+    source_day = repaired[source_index]
+    movable_stops = [
+        stop for stop in reversed(source_day.stops)
+        if stop.fixed_starts_at is None and "must_visit_seed" not in stop.selection_reasons
+    ]
+    if not movable_stops:
+        return False
+    stop_to_move = movable_stops[0]
+    for target_index, target_day in enumerate(repaired):
+        if target_index == source_index:
+            continue
+        if len(target_day.stops) >= max(target_counts.get(target_day.day_no, 1), MAX_STOPS_PER_DAY):
+            continue
+        candidate_stops = target_day.stops + [stop_to_move.model_copy(deep=True)]
+        recalc_target = recalculate_day(target_day, candidate_stops)
+        if day_overrun_minutes(recalc_target) > 0:
+            continue
+        remaining_source = [stop for stop in source_day.stops if stop.id != stop_to_move.id]
+        repaired[source_index] = recalculate_day(source_day, remaining_source)
+        repaired[target_index] = recalc_target
+        return True
+    return False
     return CandidatePlace(
         id=place_id,
         external_id=f"FASTAPI_{place_id}",

@@ -428,7 +428,7 @@ def get_schedule(schedule_id: UUID) -> ScheduleResponse:
 
 
 def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> ScheduleResponse:
-    existing = STORE.get(schedule_id)
+    existing = get_schedule(schedule_id)
     days_by_no = {day.day_no: day.model_copy(deep=True) for day in existing.days}
     existing_stop_index = {
         stop.id: (day.day_no, stop)

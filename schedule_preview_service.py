@@ -82,7 +82,7 @@ class PreviewStore:
             record = self._items.get(preview_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Schedule preview not found")
-        if datetime.now() > record.response.expires_at and record.response.status != "CONSUMED":
+        if datetime.now(SERVICE_ZONE) > record.response.expires_at and record.response.status != "CONSUMED":
             expired = record.response.model_copy(deep=True)
             expired.status = "EXPIRED"
             expired.can_generate = False
@@ -119,7 +119,7 @@ def create_preview(request: SchedulePreviewCreateRequest) -> SchedulePreviewResp
         previewId=preview_id,
         status=status,
         canGenerate=status == "READY",
-        expiresAt=datetime.now() + timedelta(minutes=PREVIEW_EXPIRATION_MINUTES),
+        expiresAt=datetime.now(SERVICE_ZONE) + timedelta(minutes=PREVIEW_EXPIRATION_MINUTES),
         timeZone=request.time_zone or DEFAULT_TIME_ZONE,
         lodgingMode=request.lodging_plan.mode,
         routeCoverage=resolve_route_coverage(request),

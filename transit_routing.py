@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal
@@ -16,10 +17,14 @@ except ModuleNotFoundError:  # pragma: no cover
     from data.schedule_models import RouteLine, ScheduleSegment, ScheduleTransit
 
 
+logger = logging.getLogger("data_ai.transit")
+
+
 TRAFFIC_TYPE_SUBWAY = 1
 TRAFFIC_TYPE_BUS = 2
 TRAFFIC_TYPE_WALK = 3
 DIRECT_WALK_THRESHOLD_METERS = 1_200
+TMAP_WALK_LINE_THRESHOLD_METERS = 500
 EARTH_RADIUS_METERS = 6_371_000.0
 
 
@@ -30,6 +35,13 @@ class TransitPoint:
     latitude: Decimal
 
 
+@dataclass(frozen=True)
+class TmapWalkingRoute:
+    total_seconds: int
+    distance_meters: int | None
+    coordinates: list[list[Decimal]]
+
+
 def find_route(
     origin: TransitPoint,
     destination: TransitPoint,
@@ -37,11 +49,30 @@ def find_route(
     route_order: int,
 ) -> tuple[ScheduleTransit, list[RouteLine]]:
     if same_point(origin, destination):
+        logger.info(
+            "transit fallback=same_point route_type=%s route_order=%s origin=%s destination=%s",
+            route_type,
+            route_order,
+            origin.name,
+            destination.name,
+        )
         transit = walk_fallback_transit(origin, destination, route_type, route_order, total_minutes=0, distance_meters=0)
         return transit, direct_route_lines(origin, destination, transit)
 
     walk_distance = distance_meters(origin.longitude, origin.latitude, destination.longitude, destination.latitude)
     if walk_distance <= DIRECT_WALK_THRESHOLD_METERS:
+        tmap_route = find_tmap_walking_route_if_enabled(origin, destination, int(round(walk_distance)))
+        if tmap_route is not None:
+            transit = tmap_walk_transit(origin, destination, route_type, route_order, tmap_route)
+            return transit, tmap_route_lines(origin, destination, transit, tmap_route)
+        logger.info(
+            "transit fallback=direct_walk route_type=%s route_order=%s origin=%s destination=%s distance_meters=%s",
+            route_type,
+            route_order,
+            origin.name,
+            destination.name,
+            int(round(walk_distance)),
+        )
         transit = walk_fallback_transit(
             origin,
             destination,
@@ -58,9 +89,42 @@ def find_route(
         try:
             path = search_odsay_path(origin, destination, odsay_api_key)
             transit, route_lines = odsay_path_to_models(path, origin, destination, route_type, route_order)
+            logger.info(
+                "transit provider=ODSAY route_type=%s route_order=%s origin=%s destination=%s total_minutes=%s transfer_count=%s fallback_used=%s segments=%s",
+                route_type,
+                route_order,
+                origin.name,
+                destination.name,
+                transit.total_minutes,
+                transit.transfer_count,
+                transit.fallback_used,
+                len(transit.segments),
+            )
             return transit, route_lines
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "transit odsay_failed route_type=%s route_order=%s origin=%s destination=%s reason=%s",
+                route_type,
+                route_order,
+                origin.name,
+                destination.name,
+                exc,
+            )
+    else:
+        logger.info(
+            "transit odsay_skipped route_type=%s route_order=%s origin=%s destination=%s enabled=%s has_api_key=%s",
+            route_type,
+            route_order,
+            origin.name,
+            destination.name,
+            odsay_enabled,
+            bool(odsay_api_key),
+        )
+
+    tmap_route = find_tmap_walking_route_if_enabled(origin, destination, int(round(walk_distance)))
+    if tmap_route is not None:
+        transit = tmap_walk_transit(origin, destination, route_type, route_order, tmap_route)
+        return transit, tmap_route_lines(origin, destination, transit, tmap_route)
 
     transit = walk_fallback_transit(
         origin,
@@ -69,6 +133,15 @@ def find_route(
         route_order,
         total_minutes=max(5, int(round(walk_distance / 900))),
         distance_meters=int(round(walk_distance)),
+    )
+    logger.info(
+        "transit fallback=estimated_walk route_type=%s route_order=%s origin=%s destination=%s distance_meters=%s total_minutes=%s",
+        route_type,
+        route_order,
+        origin.name,
+        destination.name,
+        int(round(walk_distance)),
+        transit.total_minutes,
     )
     return transit, direct_route_lines(origin, destination, transit)
 
@@ -141,11 +214,28 @@ def odsay_path_to_models(
         coordinates = coordinate_pairs_from_sub_path(sub_path)
         fallback_used = False
         if mode == "WALK":
+            line_start = coordinates[0] if coordinates else previous_line_end
+            line_end = coordinates[-1] if coordinates else coordinates_from_name(end_name, destination, origin, use_destination=True)
+            tmap_route = find_tmap_walking_route_if_enabled(
+                TransitPoint(start_name, line_start[0], line_start[1]),
+                TransitPoint(end_name, line_end[0], line_end[1]),
+                distance,
+            )
+            if tmap_route is not None:
+                coordinates = tmap_route.coordinates
+                distance = tmap_route.distance_meters
+                duration_minutes = max(1, int(ceil(tmap_route.total_seconds / 60)))
+                segment.duration_minutes = duration_minutes
+                segment.distance_meters = distance
+                line_start = coordinates[0]
+                line_end = coordinates[-1]
             if not coordinates:
                 fallback_used = True
                 line_start = previous_line_end
                 line_end = coordinates_from_name(end_name, destination, origin, use_destination=True)
                 coordinates = [line_start, line_end]
+            elif tmap_route is None and should_use_tmap_walking(distance):
+                fallback_used = True
             warnings.append("도보 경로는 실시간 보행 장애 정보를 반영하지 않습니다.")
         elif not coordinates:
             fallback_used = True
@@ -236,6 +326,49 @@ def walk_fallback_transit(
     )
 
 
+def tmap_walk_transit(
+    origin: TransitPoint,
+    destination: TransitPoint,
+    route_type: str,
+    route_order: int,
+    route: TmapWalkingRoute,
+) -> ScheduleTransit:
+    total_minutes = max(1, int(ceil(route.total_seconds / 60)))
+    return ScheduleTransit(
+        routeType=route_type,
+        routeOrder=route_order,
+        originName=origin.name,
+        destinationName=destination.name,
+        summary=f"{origin.name} -> {destination.name}",
+        totalMinutes=total_minutes,
+        walkMinutes=total_minutes,
+        waitMinutes=0,
+        transferCount=0,
+        fareAmount=None,
+        provider="TMAP_WALK",
+        realtimeStatus="UNAVAILABLE",
+        fallbackUsed=False,
+        segments=[
+            ScheduleSegment(
+                order=1,
+                mode="WALK",
+                lineName=None,
+                startStationId=None,
+                startStationName=origin.name,
+                endStationId=None,
+                endStationName=destination.name,
+                instruction=f"{origin.name}에서 {destination.name}까지 도보 이동",
+                durationMinutes=total_minutes,
+                distanceMeters=route.distance_meters,
+                stationCount=None,
+                waitMinutes=0,
+                realtimeStatus="UNAVAILABLE",
+            )
+        ],
+        warnings=["도보 경로는 실시간 보행 장애 정보를 반영하지 않습니다."],
+    )
+
+
 def direct_route_lines(
     origin: TransitPoint,
     destination: TransitPoint,
@@ -253,10 +386,179 @@ def direct_route_lines(
             durationMinutes=transit.total_minutes,
             distanceMeters=transit.segments[0].distance_meters if transit.segments else None,
             instruction="도보 이동",
-            fallbackUsed=False,
+            fallbackUsed=True,
             coordinates=[[origin.longitude, origin.latitude], [destination.longitude, destination.latitude]],
         )
     ]
+
+
+def tmap_route_lines(
+    origin: TransitPoint,
+    destination: TransitPoint,
+    transit: ScheduleTransit,
+    route: TmapWalkingRoute,
+) -> list[RouteLine]:
+    return [
+        RouteLine(
+            dayNo=0,
+            routeOrder=transit.route_order,
+            lineOrder=1,
+            mode="WALK",
+            lineName="TMAP 보행 경로",
+            startName=origin.name,
+            endName=destination.name,
+            durationMinutes=transit.total_minutes,
+            distanceMeters=route.distance_meters,
+            instruction="도보 이동",
+            fallbackUsed=False,
+            coordinates=route.coordinates,
+        )
+    ]
+
+
+def find_tmap_walking_route_if_enabled(
+    origin: TransitPoint,
+    destination: TransitPoint,
+    distance_meters: int | None,
+) -> TmapWalkingRoute | None:
+    if not should_use_tmap_walking(distance_meters):
+        return None
+
+    enabled = os.getenv("TMAP_WALKING_ENABLED", "false").lower() == "true"
+    app_key = os.getenv("SKT_API_KEY", "").strip()
+    if not enabled or not app_key:
+        logger.info(
+            "transit tmap_skipped origin=%s destination=%s enabled=%s has_app_key=%s distance_meters=%s",
+            origin.name,
+            destination.name,
+            enabled,
+            bool(app_key),
+            distance_meters,
+        )
+        return None
+
+    try:
+        route = search_tmap_walking_route(origin, destination, app_key)
+        logger.info(
+            "transit provider=TMAP_WALK origin=%s destination=%s total_seconds=%s distance_meters=%s coordinate_count=%s",
+            origin.name,
+            destination.name,
+            route.total_seconds,
+            route.distance_meters,
+            len(route.coordinates),
+        )
+        return route
+    except Exception as exc:
+        logger.warning(
+            "transit tmap_failed origin=%s destination=%s distance_meters=%s reason=%s",
+            origin.name,
+            destination.name,
+            distance_meters,
+            exc,
+        )
+        return None
+
+
+def should_use_tmap_walking(distance_meters: int | None) -> bool:
+    return distance_meters is not None and distance_meters > TMAP_WALK_LINE_THRESHOLD_METERS
+
+
+def search_tmap_walking_route(
+    origin: TransitPoint,
+    destination: TransitPoint,
+    app_key: str,
+) -> TmapWalkingRoute:
+    base_url = os.getenv("TMAP_BASE_URL", "https://apis.openapi.sk.com").rstrip("/")
+    url = f"{base_url}/tmap/routes/pedestrian?version=1&format=json"
+    body = json.dumps(
+        {
+            "startX": str(origin.longitude),
+            "startY": str(origin.latitude),
+            "endX": str(destination.longitude),
+            "endY": str(destination.latitude),
+            "reqCoordType": "WGS84GEO",
+            "resCoordType": "WGS84GEO",
+            "startName": "start",
+            "endName": "end",
+        }
+    ).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "appKey": app_key,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise RuntimeError("TMAP request failed") from exc
+
+    features = payload.get("features")
+    if not isinstance(features, list) or not features:
+        raise RuntimeError("TMAP response invalid")
+
+    coordinates = tmap_line_string_coordinates(features)
+    if len(coordinates) < 2:
+        raise RuntimeError("TMAP coordinates missing")
+
+    total_seconds = tmap_total_seconds(features)
+    if total_seconds <= 0:
+        raise RuntimeError("TMAP total time missing")
+
+    return TmapWalkingRoute(
+        total_seconds=total_seconds,
+        distance_meters=tmap_distance_meters(features),
+        coordinates=coordinates,
+    )
+
+
+def tmap_line_string_coordinates(features: list[Any]) -> list[list[Decimal]]:
+    coordinates: list[list[Decimal]] = []
+    for feature in features:
+        feature_dict = as_dict(feature)
+        geometry = as_dict(feature_dict.get("geometry"))
+        if geometry.get("type") != "LineString":
+            continue
+        raw_coordinates = geometry.get("coordinates")
+        if not isinstance(raw_coordinates, list):
+            continue
+        for item in raw_coordinates:
+            coordinate = tmap_coordinate(item)
+            if coordinate is None:
+                continue
+            if coordinates and coordinates[-1][0] == coordinate[0] and coordinates[-1][1] == coordinate[1]:
+                continue
+            coordinates.append(coordinate)
+    return coordinates
+
+
+def tmap_coordinate(value: Any) -> list[Decimal] | None:
+    if not isinstance(value, list) or len(value) < 2:
+        return None
+    return [Decimal(str(value[0])), Decimal(str(value[1]))]
+
+
+def tmap_total_seconds(features: list[Any]) -> int:
+    for feature in features:
+        properties = as_dict(as_dict(feature).get("properties"))
+        total_time = properties.get("totalTime")
+        if total_time not in (None, ""):
+            return int(float(total_time))
+    return 0
+
+
+def tmap_distance_meters(features: list[Any]) -> int | None:
+    for feature in features:
+        properties = as_dict(as_dict(feature).get("properties"))
+        total_distance = properties.get("totalDistance")
+        if total_distance not in (None, ""):
+            return int(float(total_distance))
+    return None
 
 
 def distance_meters(start_lon: Decimal, start_lat: Decimal, end_lon: Decimal, end_lat: Decimal) -> float:

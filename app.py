@@ -10,67 +10,36 @@ import pandas as pd
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-try:
-    from runtime_env import load_runtime_env
-except ModuleNotFoundError:  # pragma: no cover
-    from data.runtime_env import load_runtime_env
+from core.runtime_env import load_runtime_env
 
 load_runtime_env()
 
-try:
-    from place_analysis import PlaceAnalysis, analyze_place
-    from schedule_models import (
-        ScheduleCreateRequest,
-        ScheduleListResponse,
-        ScheduleMapResponse,
-        SchedulePreviewCreateRequest,
-        SchedulePreviewResponse,
-        SchedulePreviewScheduleRequest,
-        ScheduleResponse,
-        ScheduleUpdateRequest,
-    )
-    from schedule_preview_service import (
-        attach_schedule_to_preview,
-        consume_preview,
-        create_preview,
-        get_preview,
-    )
-    from schedule_service import (
-        CANDIDATE_POOL,
-        CANDIDATE_POOL_SOURCE,
-        create_schedule,
-        get_schedule,
-        get_schedule_map,
-        list_schedules,
-        update_schedule,
-    )
-except ModuleNotFoundError:  # pragma: no cover
-    from data.place_analysis import PlaceAnalysis, analyze_place
-    from data.schedule_models import (
-        ScheduleCreateRequest,
-        ScheduleListResponse,
-        ScheduleMapResponse,
-        SchedulePreviewCreateRequest,
-        SchedulePreviewResponse,
-        SchedulePreviewScheduleRequest,
-        ScheduleResponse,
-        ScheduleUpdateRequest,
-    )
-    from data.schedule_preview_service import (
-        attach_schedule_to_preview,
-        consume_preview,
-        create_preview,
-        get_preview,
-    )
-    from data.schedule_service import (
-        CANDIDATE_POOL,
-        CANDIDATE_POOL_SOURCE,
-        create_schedule,
-        get_schedule,
-        get_schedule_map,
-        list_schedules,
-        update_schedule,
-    )
+from place.place_analysis import PlaceAnalysis, analyze_place
+from schedule.models import (
+    ScheduleCreateRequest,
+    ScheduleListResponse,
+    ScheduleMapResponse,
+    SchedulePreviewCreateRequest,
+    SchedulePreviewResponse,
+    SchedulePreviewScheduleRequest,
+    ScheduleResponse,
+    ScheduleUpdateRequest,
+)
+from schedule.preview_service import (
+    attach_schedule_to_preview,
+    consume_preview,
+    create_preview,
+    get_preview,
+)
+from schedule.service import (
+    CANDIDATE_POOL,
+    CANDIDATE_POOL_SOURCE,
+    create_schedule,
+    get_schedule,
+    get_schedule_map,
+    list_schedules,
+    update_schedule,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"

@@ -74,8 +74,38 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY_NAME: ${{ secrets.ECR_REPOSITORY_NAME }}
 
+          SPRING_DATASOURCE_URL: ${{ secrets.SPRING_DATASOURCE_URL }}
+          SPRING_DATASOURCE_USERNAME: ${{ secrets.SPRING_DATASOURCE_USERNAME }}
+          SPRING_DATASOURCE_PASSWORD: ${{ secrets.SPRING_DATASOURCE_PASSWORD }}
+          ODSAY_API_KEY: ${{ secrets.ODSAY_API_KEY }}
+          SKT_API_KEY: ${{ secrets.SKT_API_KEY }}
+
 
         run: |
+
+          set -euo pipefail
+
+          echo "Validate required variables"
+
+          required_variables=(
+            DEV_HOST
+            DEV_SSH_USER
+            DEV_SSH_KEY
+            AWS_REGION
+            ECR_REGISTRY
+            ECR_REPOSITORY_NAME
+            SPRING_DATASOURCE_URL
+            SPRING_DATASOURCE_USERNAME
+            SPRING_DATASOURCE_PASSWORD
+            ODSAY_API_KEY
+          )
+
+          for variable_name in "${required_variables[@]}"; do
+            if [ -z "${!variable_name:-}" ]; then
+              echo "ERROR: ${variable_name} is empty"
+              exit 1
+            fi
+          done
 
           echo "Prepare SSH"
 
@@ -92,6 +122,38 @@ jobs:
           ssh-keyscan \
             -H "$DEV_HOST" \
             >> ~/.ssh/known_hosts
+
+          echo "Create .env.dev"
+
+          {
+            printf 'SPRING_DATASOURCE_URL=%s\n' "$SPRING_DATASOURCE_URL"
+            printf 'SPRING_DATASOURCE_USERNAME=%s\n' "$SPRING_DATASOURCE_USERNAME"
+            printf 'SPRING_DATASOURCE_PASSWORD=%s\n' "$SPRING_DATASOURCE_PASSWORD"
+            printf 'ODSAY_ENABLED=true\n'
+            printf 'ODSAY_API_KEY=%s\n' "$ODSAY_API_KEY"
+            if [ -n "${SKT_API_KEY:-}" ]; then
+              printf 'TMAP_WALKING_ENABLED=true\n'
+              printf 'SKT_API_KEY=%s\n' "$SKT_API_KEY"
+            fi
+          } > .env.dev
+
+          chmod 600 .env.dev
+
+          echo "Upload .env.dev"
+
+          ssh \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -i ~/.ssh/dev_key \
+            "$DEV_SSH_USER@$DEV_HOST" \
+            "sudo mkdir -p /opt/hackathon-dev && sudo chown -R $DEV_SSH_USER:$DEV_SSH_USER /opt/hackathon-dev"
+
+          scp \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -i ~/.ssh/dev_key \
+            .env.dev \
+            "$DEV_SSH_USER@$DEV_HOST:/opt/hackathon-dev/.env.dev"
 
 
 
@@ -138,6 +200,7 @@ jobs:
               --restart unless-stopped \
               --network hackathon-network \
               -p 127.0.0.1:8010:8010 \
+              --env-file /opt/hackathon-dev/.env.dev \
               ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:latest-dev
 
 
@@ -161,4 +224,4 @@ jobs:
             "
 
 
-          rm -f ~/.ssh/dev_key
+          rm -f .env.dev ~/.ssh/dev_key

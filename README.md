@@ -148,19 +148,19 @@ FastAPI 호출을 위한 위임 레이어로 정리되고 있습니다.
 - ODSAY 응답 포함 경로 생성 확인
 - TMAP 보행 경로 코드 반영 완료
 - Spring -> FastAPI 일정 위임 경로 연결 완료
+- Spring 내부의 구 일정 planner / evaluation / AI planner client 레거시 코드 정리 완료
+- `data-ai` 배포 workflow에 DB / ODSAY / TMAP env 전달 경로 반영 완료
 
 ### 반쯤 이전된 것
 
 - 공개 API 진입점은 아직 Spring이 유지
 - 프론트는 여전히 Spring API 계약에 의존하는 부분이 있음
-- Spring 내부에는 일정 관련 레거시 planner 패키지가 일부 남아 있을 수 있음
-- 운영 배포는 env 누락 시 다시 Spring/FastAPI 연결 문제가 날 수 있음
+- 운영 반영 후 실제 EC2 컨테이너가 새 workflow/env로 올라왔는지 확인이 필요함
 
 ### 아직 남은 것
 
-- Spring 내부에 남아 있는 완전 미사용 일정 생성 코드 최종 정리
-- 필요 시 planner 패키지/레거시 helper 제거 범위 확정
-- 배포 스크립트에서 FastAPI 위임 env 누락 방지
+- 배포 후 `server-dev`, `data-ai` 가 새 env 기준으로 정상 재기동되는지 확인
+- 프론트가 현재 preview/create 응답과 에러 포맷을 안정적으로 처리하는지 확인
 - 프론트의 일정 생성 플로우와 새 preview/create 응답 간 예외 처리 정리
 
 ## 반드시 알아야 하는 운영 조건
@@ -190,6 +190,9 @@ ODSAY_ENABLED=true
 ODSAY_API_KEY=...
 SKT_API_KEY=...
 ```
+
+현재 `data/.github/workflows/deploy-dev.yml` 은 위 값을 `.env.dev` 로 만들어
+EC2의 `data-ai` 컨테이너를 `--env-file /opt/hackathon-dev/.env.dev` 방식으로 실행하도록 정리된 상태입니다.
 
 ## 로컬 실행
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+import logging
 from threading import Lock
 from zoneinfo import ZoneInfo
 from uuid import UUID, uuid4
@@ -36,6 +37,7 @@ MIN_AVAILABLE_MINUTES = 180
 PREVIEW_EXPIRATION_MINUTES = 30
 MAX_STOPS_PER_DAY = 5
 SERVICE_ZONE = ZoneInfo(DEFAULT_TIME_ZONE)
+log = logging.getLogger("data.schedule.preview")
 
 
 @dataclass
@@ -121,7 +123,13 @@ def create_preview(request: SchedulePreviewCreateRequest) -> SchedulePreviewResp
         try:
             save_preview(response, request)
         except Exception:
-            pass
+            log.exception("failed to persist preview. previewId=%s", response.preview_id)
+    log.info(
+        "preview stored. previewId=%s, status=%s, conflicts=%s",
+        response.preview_id,
+        response.status,
+        len(response.conflicts),
+    )
     return response
 
 
@@ -131,6 +139,7 @@ def get_preview(preview_id: UUID) -> SchedulePreviewResponse:
     except HTTPException:
         if not db_enabled():
             raise
+        log.info("preview cache miss. loading from db. previewId=%s", preview_id)
         preview, request = load_preview(preview_id)
         resolved_days = preview.resolved_days
         record = PreviewRecord(
@@ -150,6 +159,7 @@ def consume_preview(
         raise HTTPException(status_code=409, detail="Preview already consumed")
     if record.response.status != "READY":
         raise HTTPException(status_code=400, detail="Preview is not ready for schedule generation")
+    log.info("preview consumed for schedule generation. previewId=%s", request.preview_id)
     return record.response, record.create_request, record.fixed_events_by_day
 
 
@@ -159,7 +169,8 @@ def attach_schedule_to_preview(preview_id: UUID, schedule_id: UUID) -> None:
         try:
             mark_preview_consumed(preview_id)
         except Exception:
-            pass
+            log.exception("failed to mark preview consumed in db. previewId=%s, scheduleId=%s", preview_id, schedule_id)
+    log.info("preview marked consumed. previewId=%s, scheduleId=%s", preview_id, schedule_id)
 
 
 def validate_request(request: SchedulePreviewCreateRequest) -> None:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from uuid import UUID
 
@@ -34,6 +37,7 @@ from schedule.preview_service import (
 from schedule.service import (
     CANDIDATE_POOL,
     CANDIDATE_POOL_SOURCE,
+    db_runtime_status,
     create_schedule,
     get_schedule,
     get_schedule_map,
@@ -352,15 +356,20 @@ def response_from_prediction(
 app = FastAPI(title="TourAPI AI Server", version="0.1.0")
 model = load_model()
 MODEL_SOURCE_CATEGORIES = known_source_categories()
+log = logging.getLogger("data.app")
 
 
 @app.get("/health")
-def health() -> dict[str, str | int]:
+def health() -> dict[str, str | int | bool | None]:
     return {
         "status": "ok",
         "model_path": str(MODEL_PATH),
         "schedule_candidate_source": CANDIDATE_POOL_SOURCE,
         "schedule_candidate_count": len(CANDIDATE_POOL),
+        "schedule_db_enabled": db_runtime_status()["db_enabled"],
+        "schedule_db_host": db_runtime_status()["db_host"],
+        "odsay_enabled": os.getenv("ODSAY_ENABLED", "false").lower() == "true",
+        "tmap_walking_enabled": os.getenv("TMAP_WALKING_ENABLED", "false").lower() == "true",
     }
 
 
@@ -428,7 +437,16 @@ def predict_batch(payloads: list[PredictRequest]) -> list[PredictResponse]:
 
 @app.post("/api/v1/schedule-previews", response_model=SchedulePreviewResponse, status_code=201)
 def create_schedule_preview_endpoint(payload: SchedulePreviewCreateRequest) -> SchedulePreviewResponse:
-    return create_preview(payload)
+    started_at = monotonic()
+    preview = create_preview(payload)
+    log.info(
+        "schedule preview created. previewId=%s, status=%s, days=%s, elapsedMs=%d",
+        preview.preview_id,
+        preview.status,
+        len(preview.resolved_days),
+        int((monotonic() - started_at) * 1000),
+    )
+    return preview
 
 
 @app.get("/api/v1/schedule-previews/{preview_id}", response_model=SchedulePreviewResponse)
@@ -441,9 +459,15 @@ def create_schedule_endpoint(
     payload: ScheduleCreateRequest | SchedulePreviewScheduleRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ScheduleResponse:
+    started_at = monotonic()
     if idempotency_key:
         if not isinstance(payload, SchedulePreviewScheduleRequest):
             payload = SchedulePreviewScheduleRequest.model_validate(payload.model_dump(by_alias=True))
+        log.info(
+            "schedule create requested from preview. previewId=%s, idempotencyKey=%s",
+            payload.preview_id,
+            idempotency_key,
+        )
         preview, create_request, fixed_events_by_day = consume_preview(payload)
         schedule = create_schedule(
             create_request,
@@ -451,11 +475,28 @@ def create_schedule_endpoint(
             fixed_events_by_day=fixed_events_by_day,
         )
         attach_schedule_to_preview(preview.preview_id, schedule.id)
+        log.info(
+            "schedule created from preview. previewId=%s, scheduleId=%s, elapsedMs=%d",
+            preview.preview_id,
+            schedule.id,
+            int((monotonic() - started_at) * 1000),
+        )
         return schedule
 
     if not isinstance(payload, ScheduleCreateRequest):
         payload = ScheduleCreateRequest.model_validate(payload.model_dump(by_alias=True))
-    return create_schedule(payload)
+    log.info(
+        "schedule create requested directly. startDate=%s, endDate=%s",
+        payload.start_date,
+        payload.end_date,
+    )
+    schedule = create_schedule(payload)
+    log.info(
+        "direct schedule created. scheduleId=%s, elapsedMs=%d",
+        schedule.id,
+        int((monotonic() - started_at) * 1000),
+    )
+    return schedule
 
 
 @app.get("/api/v1/schedules", response_model=ScheduleListResponse)

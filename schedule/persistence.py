@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -40,6 +41,8 @@ from schedule.models import (
     StopMarker,
 )
 
+log = logging.getLogger("data.schedule.persistence")
+
 
 def resolve_db_dsn() -> tuple[str | None, str | None, str | None]:
     jdbc_url = os.getenv("SPRING_DATASOURCE_URL")
@@ -73,6 +76,7 @@ def connect():
         kwargs["user"] = username
     if password and parsed.password is None:
         kwargs["password"] = password
+    log.debug("opening schedule db connection. host=%s, db_enabled=%s", parsed.hostname, True)
     return psycopg.connect(**kwargs)
 
 

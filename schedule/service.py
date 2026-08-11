@@ -42,8 +42,7 @@ from schedule.persistence import (
 from transit.routing import TransitPoint, find_route
 
 load_runtime_env()
-
-logger = logging.getLogger(__name__)
+log = logging.getLogger("data.schedule.service")
 
 DEFAULT_PLANNING_WARNINGS = [
     "일부 장소 정보는 운영시간과 상세 안내를 방문 전에 다시 확인해 주세요.",
@@ -259,19 +258,30 @@ def load_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidatePla
                 cursor.execute(CANDIDATE_SELECT + "          AND id = ANY(%s)\n", (place_ids,))
                 rows = cursor.fetchall()
     except Exception:
-        logger.exception("failed to load places by id from database. placeIds=%s", place_ids)
+        log.exception("failed to load places by id from database. placeIds=%s", place_ids)
         return None
 
     return {candidate.id: candidate for candidate in rows_to_candidates(rows)}
 
 
+def db_runtime_status() -> dict[str, str | bool | None]:
+    dsn, _, _ = resolve_db_dsn()
+    parsed = urlsplit(dsn) if dsn else None
+    return {
+        "db_enabled": bool(dsn),
+        "db_host": parsed.hostname if parsed else None,
+    }
+
+
 def load_candidate_places_from_db() -> list[CandidatePlace]:
     dsn, username, password = resolve_db_dsn()
     if not dsn:
+        log.info("candidate place db load skipped: database dsn not configured")
         return []
     try:
         import psycopg
     except ModuleNotFoundError:
+        log.warning("candidate place db load skipped: psycopg not installed")
         return []
 
     connect_kwargs: dict[str, object] = {
@@ -291,10 +301,11 @@ def load_candidate_places_from_db() -> list[CandidatePlace]:
                 cursor.execute(query)
                 rows = cursor.fetchall()
     except Exception:
-        logger.exception("failed to load candidate places from database; falling back")
+        log.exception("candidate place db load failed")
         return []
 
     candidates = rows_to_candidates(rows)
+    log.info("candidate place db load succeeded. count=%s", len(candidates))
     return candidates
 
 
@@ -312,6 +323,7 @@ def load_candidate_places() -> tuple[list[CandidatePlace], str]:
     if db_candidates:
         return db_candidates, "database"
     if not CANDIDATE_PLACES_PATH.exists():
+        log.warning("candidate_places.json missing. using built-in defaults")
         return DEFAULT_CANDIDATES, "built_in_default"
     try:
         raw_items = json.loads(CANDIDATE_PLACES_PATH.read_text(encoding="utf-8"))
@@ -329,16 +341,18 @@ def load_candidate_places() -> tuple[list[CandidatePlace], str]:
             for item in raw_items
         ]
         if candidates:
+            log.info("candidate place json load succeeded. count=%s", len(candidates))
             return candidates, "json_fallback"
         return DEFAULT_CANDIDATES, "built_in_default"
     except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        log.exception("candidate place json load failed. using built-in defaults")
         return DEFAULT_CANDIDATES, "built_in_default"
 
 
 CANDIDATE_POOL, CANDIDATE_POOL_SOURCE = load_candidate_places()
 
 if CANDIDATE_POOL_SOURCE != "database":
-    logger.warning(
+    log.warning(
         "schedule candidate pool is not backed by the database. source=%s count=%s. "
         "일정 품질이 크게 떨어진다. SPRING_DATASOURCE_* 환경변수를 확인할 것.",
         CANDIDATE_POOL_SOURCE, len(CANDIDATE_POOL),
@@ -380,6 +394,13 @@ def create_schedule(
     preview_id: UUID | None = None,
     fixed_events_by_day: dict[int, list[FixedEventSpec]] | None = None,
 ) -> ScheduleResponse:
+    log.info(
+        "schedule build started. previewId=%s, startDate=%s, endDate=%s, candidateSource=%s",
+        preview_id,
+        request.start_date,
+        request.end_date,
+        CANDIDATE_POOL_SOURCE,
+    )
     planned_days = plan_days(request)
     places_by_day = distribute_must_visit_places(planned_days, request.must_visit_place_ids)
     target_counts = target_stop_counts(planned_days, request)
@@ -437,10 +458,13 @@ def create_schedule(
         try:
             save_schedule_to_db(saved, condition_request=request)
         except Exception:
-            # 저장에 실패해도 응답은 201 로 나간다. 재시작하면 사라지므로 반드시
-            # 로그로 남긴다. 이 로그가 없어 transit_routes 기본키 충돌을 며칠간
-            # 아무도 알아채지 못했다.
-            logger.exception("failed to persist created schedule. scheduleId=%s", saved.id)
+            log.exception("schedule persistence failed. scheduleId=%s", saved.id)
+    log.info(
+        "schedule build finished. scheduleId=%s, days=%s, routeCoverage=%s",
+        saved.id,
+        len(saved.days),
+        saved.planning_assumptions.route_coverage if saved.planning_assumptions else None,
+    )
     return saved
 
 
@@ -449,7 +473,7 @@ def list_schedules() -> ScheduleListResponse:
         try:
             return list_schedules_from_db()
         except Exception:
-            logger.exception("failed to list schedules from database; falling back to memory store")
+            log.exception("schedule list db load failed. falling back to memory store")
     return STORE.list()
 
 
@@ -461,10 +485,7 @@ def get_schedule(schedule_id: UUID) -> ScheduleResponse:
             # 존재하지 않는 일정의 404 는 정상 응답이므로 그대로 올린다.
             raise
         except Exception:
-            logger.exception(
-                "failed to load schedule from database; falling back to memory store. scheduleId=%s",
-                schedule_id,
-            )
+            log.exception("schedule get db load failed. scheduleId=%s", schedule_id)
     return STORE.get(schedule_id)
 
 
@@ -526,7 +547,8 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
         try:
             save_schedule_to_db(saved, condition_request=request_context_from_schedule(saved))
         except Exception:
-            logger.exception("failed to persist updated schedule. scheduleId=%s", saved.id)
+            log.exception("schedule update persistence failed. scheduleId=%s", saved.id)
+    log.info("schedule updated. scheduleId=%s, days=%s", saved.id, len(saved.days))
     return saved
 
 

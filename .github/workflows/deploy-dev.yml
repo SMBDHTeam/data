@@ -123,7 +123,11 @@ jobs:
             -H "$DEV_HOST" \
             >> ~/.ssh/known_hosts
 
-          echo "Create .env.dev"
+          # server 레포의 배포 워크플로도 같은 디렉터리에 환경변수 파일을 만든다.
+          # 예전에는 두 레포가 모두 .env.dev를 써서 나중에 배포한 쪽이 상대의 값을
+          # 덮어썼고, 그 뒤 상대 컨테이너가 재시작하면 설정을 잃었다.
+          # 파일을 분리해 서로 간섭하지 않게 한다. (server는 .env.server를 쓴다)
+          echo "Create .env.data"
 
           {
             printf 'SPRING_DATASOURCE_URL=%s\n' "$SPRING_DATASOURCE_URL"
@@ -135,11 +139,11 @@ jobs:
               printf 'TMAP_WALKING_ENABLED=true\n'
               printf 'SKT_API_KEY=%s\n' "$SKT_API_KEY"
             fi
-          } > .env.dev
+          } > .env.data
 
-          chmod 600 .env.dev
+          chmod 600 .env.data
 
-          echo "Upload .env.dev"
+          echo "Upload .env.data"
 
           ssh \
             -o BatchMode=yes \
@@ -152,8 +156,8 @@ jobs:
             -o BatchMode=yes \
             -o ConnectTimeout=10 \
             -i ~/.ssh/dev_key \
-            .env.dev \
-            "$DEV_SSH_USER@$DEV_HOST:/opt/hackathon-dev/.env.dev"
+            .env.data \
+            "$DEV_SSH_USER@$DEV_HOST:/opt/hackathon-dev/.env.data"
 
 
 
@@ -200,7 +204,7 @@ jobs:
               --restart unless-stopped \
               --network hackathon-network \
               -p 127.0.0.1:8010:8010 \
-              --env-file /opt/hackathon-dev/.env.dev \
+              --env-file /opt/hackathon-dev/.env.data \
               ${ECR_REGISTRY}/${ECR_REPOSITORY_NAME}:latest-dev
 
 
@@ -224,4 +228,4 @@ jobs:
             "
 
 
-          rm -f .env.dev ~/.ssh/dev_key
+          rm -f .env.data ~/.ssh/dev_key

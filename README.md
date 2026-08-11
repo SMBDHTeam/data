@@ -283,3 +283,46 @@ curl -s -X POST http://127.0.0.1:8010/api/v1/schedule-previews \
 
 다만 공개 API의 최종 진입점과 일부 운영 흐름은 아직 Spring이 잡고 있으므로,
 현재 단계는 “마이그레이션 완료 직전의 하이브리드 운영 상태”로 보면 됩니다.
+
+
+## 배포에 필요한 GitHub Secrets
+
+`deploy-dev.yml`은 아래 값을 요구합니다. 하나라도 비어 있으면 배포가 실패합니다.
+
+| Secret | 용도 |
+| --- | --- |
+| `DEV_HOST`, `DEV_SSH_USER`, `DEV_SSH_KEY` | EC2 접속 |
+| `AWS_REGION`, `AWS_ROLE_ARN`, `ECR_REPOSITORY_NAME` | 이미지 push |
+| `SPRING_DATASOURCE_URL` | 일정·후보 장소 DB |
+| `SPRING_DATASOURCE_USERNAME` | 〃 |
+| `SPRING_DATASOURCE_PASSWORD` | 〃 |
+| `ODSAY_API_KEY` | 실제 대중교통 경로 |
+| `SKT_API_KEY` | TMAP 보행 경로 (선택. 없으면 보행 경로 비활성) |
+
+`server` 레포와 같은 값을 쓰므로 조직(Organization) Secret으로 한 번만 등록하는 편이 낫습니다.
+두 레포 모두 public이라 무료 플랜에서도 조직 Secret을 쓸 수 있습니다.
+
+### DB env가 없으면 조용히 망가진다
+
+`SPRING_DATASOURCE_*`가 없으면 `db_enabled()`가 `False`가 되어 이렇게 동작합니다.
+
+- 일정이 **메모리에만** 저장된다. 컨테이너를 재시작하면 전부 사라진다.
+- 후보 장소가 DB(수백 곳)가 아니라 JSON 폴백(15곳)으로 줄어 일정 품질이 급락한다.
+- 그럼에도 API는 계속 `200`/`201`을 반환한다.
+
+`/health`의 `schedule_candidate_source`가 `database`인지로 확인할 수 있다.
+
+```bash
+curl -s http://127.0.0.1:8010/health
+```
+
+`json_fallback` 또는 `built_in_default`가 보이면 DB env가 빠진 상태입니다.
+
+## 배포 환경변수 파일
+
+이 워크플로는 EC2의 `/opt/hackathon-dev/.env.data`에 환경변수를 기록하고
+컨테이너에 `--env-file`로 전달합니다.
+
+`server` 레포는 같은 디렉터리의 `.env.server`를 씁니다. 예전에는 두 레포가 모두
+`.env.dev`를 써서 나중에 배포한 쪽이 상대의 값을 덮어썼고, 그 뒤 상대 컨테이너가
+재시작하면 설정을 잃었습니다. 파일 분리로 이 간섭을 없앴습니다.

@@ -332,11 +332,11 @@ def save_stop(cur, schedule_id: UUID, day: ScheduleDay, stop: ScheduleStop) -> N
     cur.execute(
         """
         INSERT INTO schedule_stops (
-            id, schedule_day_id, place_id, stop_order, stay_minutes, selection_reasons_json, warnings_json,
-            fixed_starts_at, fixed_ends_at
+            id, schedule_day_id, place_id, stop_order, stay_minutes, arrive_at, depart_at,
+            selection_reasons_json, warnings_json, fixed_starts_at, fixed_ends_at
         ) VALUES (
-            %(id)s, %(schedule_day_id)s, %(place_id)s, %(stop_order)s, %(stay_minutes)s, %(selection_reasons_json)s, %(warnings_json)s,
-            %(fixed_starts_at)s, %(fixed_ends_at)s
+            %(id)s, %(schedule_day_id)s, %(place_id)s, %(stop_order)s, %(stay_minutes)s, %(arrive_at)s, %(depart_at)s,
+            %(selection_reasons_json)s, %(warnings_json)s, %(fixed_starts_at)s, %(fixed_ends_at)s
         )
         """,
         {
@@ -345,6 +345,8 @@ def save_stop(cur, schedule_id: UUID, day: ScheduleDay, stop: ScheduleStop) -> N
             "place_id": stop.place.id,
             "stop_order": stop.order,
             "stay_minutes": stop.stay_minutes,
+            "arrive_at": stop.arrive_at,
+            "depart_at": stop.depart_at,
             "selection_reasons_json": json.dumps(stop.selection_reasons, ensure_ascii=False),
             "warnings_json": json.dumps(stop.warnings, ensure_ascii=False),
             "fixed_starts_at": as_offset(stop.fixed_starts_at),
@@ -574,6 +576,9 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
             id=row["id"],
             order=row["stop_order"],
             stayMinutes=row["stay_minutes"],
+            # V7 이전에 저장된 방문지는 두 값이 없다. 그때는 null 로 둔다.
+            arriveAt=row.get("arrive_at"),
+            departAt=row.get("depart_at"),
             place=place,
             inboundTransit=inbound,
             selectionReasons=json.loads(row["selection_reasons_json"] or "[]"),

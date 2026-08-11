@@ -384,6 +384,8 @@ def create_schedule(
     places_by_day = distribute_must_visit_places(planned_days, request.must_visit_place_ids)
     target_counts = target_stop_counts(planned_days, request)
     days: list[ScheduleDay] = []
+    # 앞선 일차에서 쓴 장소를 누적해 다음 일차가 같은 곳을 다시 고르지 않게 한다.
+    used_place_ids: set[int] = set()
     for planned_day in planned_days:
         day_place_ids = places_by_day.get(planned_day.day_no, [])
         target_count = max(len(day_place_ids), target_counts.get(planned_day.day_no, 1))
@@ -393,6 +395,10 @@ def create_schedule(
             target_count,
             request,
             fixed_events_by_day.get(planned_day.day_no, []) if fixed_events_by_day else [],
+            used_place_ids,
+        )
+        used_place_ids.update(
+            stop.place.id for stop in stops if stop.place is not None and stop.place.id is not None
         )
         days.append(
             ScheduleDay(
@@ -663,11 +669,14 @@ def build_stops(
     target_count: int,
     request: ScheduleCreateRequest,
     fixed_events: list[FixedEventSpec],
+    used_place_ids: set[int] | None = None,
 ) -> list[ScheduleStop]:
     fixed_event_place_ids = [event.place_id for event in fixed_events]
     must_visit_ids = dedupe_ints(place_ids + fixed_event_place_ids)
     effective_target_count = max(target_count, len(must_visit_ids))
-    candidates = choose_candidate_places(planned_day, request, effective_target_count, must_visit_ids)
+    candidates = choose_candidate_places(
+        planned_day, request, effective_target_count, must_visit_ids, used_place_ids
+    )
     if not candidates:
         return []
     candidates = order_candidates_for_day(planned_day, candidates, fixed_events)
@@ -1403,9 +1412,19 @@ def choose_candidate_places(
     request: ScheduleCreateRequest,
     target_count: int,
     must_visit_ids: list[int],
+    used_place_ids: set[int] | None = None,
 ) -> list[CandidatePlace]:
+    """한 일차의 방문지를 고른다.
+
+    used_place_ids 는 앞선 일차에서 이미 쓴 장소다. 이 값을 받지 않으면 일차마다
+    같은 후보 풀을 같은 기준으로 정렬해 같은 상위 N개를 골라, 2일 일정의 모든 날이
+    똑같은 장소로 채워진다.
+
+    후보가 모자라면 재사용을 허용한다. 같은 장소가 반복되는 편이 빈 일차보다 낫다.
+    """
     resolved: list[CandidatePlace] = []
     seen_ids: set[int] = set()
+    already_used = set(used_place_ids or ())
     selected_experience_types: list[str] = []
     selected_semantic_groups: list[str] = []
     # 후보 풀은 모듈 로드 시 한 번만 채워지므로 그 뒤 등록된 장소는 들어 있지 않다.
@@ -1438,6 +1457,11 @@ def choose_candidate_places(
         (candidate for candidate in CANDIDATE_POOL if candidate.id not in seen_ids),
         key=lambda candidate: candidate_rank(candidate, planned_day, request, theme_answer_id),
     )
+    # 앞선 일차에서 쓴 장소는 뒤로 미룬다. 완전히 배제하지 않는 이유는 후보 풀이
+    # 작을 때 일차가 비는 것을 막기 위해서다.
+    unused_first = [c for c in ranked if c.id not in already_used]
+    reusable = [c for c in ranked if c.id in already_used]
+    ranked = unused_first + reusable
     for candidate in ranked:
         if len(resolved) >= target_count:
             break

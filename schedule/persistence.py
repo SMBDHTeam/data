@@ -302,7 +302,7 @@ def save_day(cur, schedule_id: UUID, day: ScheduleDay) -> None:
         )
         """,
         {
-            "id": uuid_from_day(day),
+            "id": uuid_from_day(schedule_id, day),
             "schedule_id": schedule_id,
             "day_no": day.day_no,
             "date": day.date,
@@ -321,7 +321,7 @@ def save_day(cur, schedule_id: UUID, day: ScheduleDay) -> None:
     for stop in day.stops:
         save_stop(cur, schedule_id, day, stop)
     if day.final_transit is not None:
-        save_transit(cur, day, None, day.final_transit)
+        save_transit(cur, schedule_id, day, None, day.final_transit)
 
 
 def save_stop(cur, schedule_id: UUID, day: ScheduleDay, stop: ScheduleStop) -> None:
@@ -337,7 +337,7 @@ def save_stop(cur, schedule_id: UUID, day: ScheduleDay, stop: ScheduleStop) -> N
         """,
         {
             "id": stop.id,
-            "schedule_day_id": uuid_from_day(day),
+            "schedule_day_id": uuid_from_day(schedule_id, day),
             "place_id": stop.place.id,
             "stop_order": stop.order,
             "stay_minutes": stop.stay_minutes,
@@ -367,11 +367,20 @@ def save_stop(cur, schedule_id: UUID, day: ScheduleDay, stop: ScheduleStop) -> N
             },
         )
     if stop.inbound_transit is not None:
-        save_transit(cur, day, stop, stop.inbound_transit)
+        save_transit(cur, schedule_id, day, stop, stop.inbound_transit)
 
 
-def save_transit(cur, day: ScheduleDay, stop: ScheduleStop | None, transit: ScheduleTransit) -> None:
-    route_id = deterministic_route_id(day.day_no, stop.id if stop else None, transit.route_order, transit.route_type or "FINAL")
+def save_transit(
+    cur,
+    schedule_id: UUID,
+    day: ScheduleDay,
+    stop: ScheduleStop | None,
+    transit: ScheduleTransit,
+) -> None:
+    route_id = deterministic_route_id(
+        schedule_id, day.day_no, stop.id if stop else None, transit.route_order,
+        transit.route_type or "FINAL",
+    )
     cur.execute(
         """
         INSERT INTO transit_routes (
@@ -384,7 +393,7 @@ def save_transit(cur, day: ScheduleDay, stop: ScheduleStop | None, transit: Sche
         """,
         {
             "id": route_id,
-            "schedule_day_id": uuid_from_day(day),
+            "schedule_day_id": uuid_from_day(schedule_id, day),
             "schedule_stop_id": stop.id if stop else None,
             "route_type": transit.route_type or ("FINAL" if stop is None else "INBOUND"),
             "route_order": transit.route_order or (stop.order if stop else len(day.stops) + 1),
@@ -692,18 +701,40 @@ def dump_model(model: Any) -> Any:
     return model
 
 
-def uuid_from_day(day: ScheduleDay) -> UUID:
+def uuid_from_day(schedule_id: UUID, day: ScheduleDay) -> UUID:
+    """일차 행의 기본키.
+
+    일정 식별자를 반드시 포함한다. 예전에는 날짜와 시각만으로 만들어, 같은 날짜
+    범위를 가진 서로 다른 일정이 같은 schedule_days 행을 공유하거나 기본키 충돌로
+    저장에 실패했다.
+    """
     namespace = UUID("12345678-1234-5678-1234-567812345678")
     import uuid as uuid_pkg
 
-    return uuid_pkg.uuid5(namespace, f"{day.date.isoformat()}:{day.day_no}:{day.start_time}:{day.end_time}")
+    return uuid_pkg.uuid5(
+        namespace,
+        f"{schedule_id}:{day.date.isoformat()}:{day.day_no}:{day.start_time}:{day.end_time}",
+    )
 
 
-def deterministic_route_id(day_no: int, stop_id: UUID | None, route_order: int, route_type: str) -> UUID:
+def deterministic_route_id(
+    schedule_id: UUID,
+    day_no: int,
+    stop_id: UUID | None,
+    route_order: int,
+    route_type: str,
+) -> UUID:
+    """경로 행의 기본키.
+
+    일정 식별자를 반드시 포함한다. FINAL 구간은 stop_id 가 None 이라, 예전 방식
+    ("일차:None:순서:FINAL")으로는 일정이 달라도 같은 id 가 나왔다. 그래서 두 번째
+    일정부터 transit_routes_pkey 충돌로 저장이 실패했고, 호출부가 예외를 삼켜
+    응답만 201 이 나가고 데이터는 남지 않았다.
+    """
     namespace = UUID("87654321-4321-8765-4321-876543218765")
     import uuid as uuid_pkg
 
-    return uuid_pkg.uuid5(namespace, f"{day_no}:{stop_id}:{route_order}:{route_type}")
+    return uuid_pkg.uuid5(namespace, f"{schedule_id}:{day_no}:{stop_id}:{route_order}:{route_type}")
 
 
 def as_offset(value: datetime | None):

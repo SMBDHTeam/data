@@ -27,7 +27,7 @@ from schedule.models import (
     SelectedAnswer,
 )
 from schedule.persistence import db_enabled, load_preview, mark_preview_consumed, save_preview
-from schedule.service import FixedEventSpec
+from schedule.service import FixedEventSpec, load_candidate_places_by_ids
 
 DEFAULT_TIME_ZONE = "Asia/Seoul"
 DEFAULT_DAY_START = time(10, 0)
@@ -409,6 +409,29 @@ def validate_place_limits(request: SchedulePreviewCreateRequest, trip_days: int)
     unique_place_ids.update(event.place_id for event in request.fixed_events)
     if len(unique_place_ids) > trip_days * MAX_STOPS_PER_DAY:
         raise HTTPException(status_code=400, detail="Too many must-visit places for trip length")
+    validate_places_exist(sorted(unique_place_ids))
+
+
+def validate_places_exist(place_ids: list[int]) -> None:
+    """존재하지 않는 장소 id 를 Preview 단계에서 걸러낸다.
+
+    예전에는 개수만 검사해, 없는 id 를 보내도 Preview 가 READY 로 통과하고
+    일정 생성에서야 실패했다. API_SPEC 의 Preview 검증 항목에도 "필수 방문 장소
+    수와 존재 여부"로 명시돼 있다.
+    """
+    if not place_ids:
+        return
+    found = load_candidate_places_by_ids(place_ids)
+    if not found:
+        # DB 를 읽지 못하는 환경에서는 검증을 건너뛴다. 여기서 막으면 조회 실패가
+        # 사용자 입력 오류로 둔갑한다.
+        return
+    missing = [place_id for place_id in place_ids if place_id not in found]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"placeIds do not exist: {missing}",
+        )
 
 
 def interpret_prompt(custom_prompt: str | None) -> InterpretedPrompt:

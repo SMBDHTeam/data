@@ -184,6 +184,81 @@ def resolve_db_dsn() -> tuple[str | None, str | None, str | None]:
     return None, None, None
 
 
+CANDIDATE_SELECT = """
+        SELECT
+            id,
+            external_content_id,
+            COALESCE(content_type_id, '12') AS content_type_id,
+            name,
+            CASE
+                WHEN category IS NOT NULL AND btrim(category) <> '' THEN category
+                ELSE COALESCE(content_type_id, '12')
+            END AS category_label,
+            address,
+            longitude::text,
+            latitude::text
+        FROM places
+        WHERE name IS NOT NULL
+          AND longitude IS NOT NULL
+          AND latitude IS NOT NULL
+"""
+
+
+def rows_to_candidates(rows) -> list[CandidatePlace]:
+    candidates: list[CandidatePlace] = []
+    for row in rows:
+        raw_category_label = str(row[4]) if row[4] is not None else ""
+        candidates.append(
+            CandidatePlace(
+                id=int(row[0]),
+                external_id=str(row[1]),
+                content_type_id=str(row[2]),
+                name=str(row[3]),
+                category_label=normalize_category_label(raw_category_label, str(row[2])),
+                address=str(row[5]) if row[5] is not None else None,
+                longitude=Decimal(str(row[6])),
+                latitude=Decimal(str(row[7])),
+            )
+        )
+    return candidates
+
+
+def load_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidatePlace]:
+    """주어진 id 의 장소를 DB 에서 직접 읽는다.
+
+    후보 풀(CANDIDATE_POOL)은 모듈 로드 시 한 번만 채워지므로, 그 뒤에 등록된
+    장소는 들어 있지 않다. 사용자가 방금 등록한 장소를 필수 방문지로 지정하면
+    후보 풀에서 찾을 수 없어 일정 생성이 실패했다. 그런 id 만 여기서 조회한다.
+    """
+    if not place_ids:
+        return {}
+    dsn, username, password = resolve_db_dsn()
+    if not dsn:
+        return {}
+    try:
+        import psycopg
+    except ModuleNotFoundError:
+        return {}
+
+    connect_kwargs: dict[str, object] = {"conninfo": dsn, "autocommit": True}
+    parsed_dsn = urlsplit(dsn)
+    if username and parsed_dsn.username is None:
+        connect_kwargs["user"] = username
+    if password and parsed_dsn.password is None:
+        connect_kwargs["password"] = password
+
+    try:
+        with psycopg.connect(**connect_kwargs) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(CANDIDATE_SELECT + "          AND id = ANY(%s)\n", (place_ids,))
+                rows = cursor.fetchall()
+    except Exception:
+        logger.exception("failed to load places by id from database. placeIds=%s", place_ids)
+        return {}
+
+    return {candidate.id: candidate for candidate in rows_to_candidates(rows)}
+
+
 def load_candidate_places_from_db() -> list[CandidatePlace]:
     dsn, username, password = resolve_db_dsn()
     if not dsn:
@@ -203,25 +278,7 @@ def load_candidate_places_from_db() -> list[CandidatePlace]:
     if password and parsed_dsn.password is None:
         connect_kwargs["password"] = password
 
-    query = """
-        SELECT
-            id,
-            external_content_id,
-            COALESCE(content_type_id, '12') AS content_type_id,
-            name,
-            CASE
-                WHEN category IS NOT NULL AND btrim(category) <> '' THEN category
-                ELSE COALESCE(content_type_id, '12')
-            END AS category_label,
-            address,
-            longitude::text,
-            latitude::text
-        FROM places
-        WHERE name IS NOT NULL
-          AND longitude IS NOT NULL
-          AND latitude IS NOT NULL
-        ORDER BY id
-    """
+    query = CANDIDATE_SELECT + "\n        ORDER BY id\n"
     try:
         with psycopg.connect(**connect_kwargs) as connection:
             with connection.cursor() as cursor:
@@ -231,21 +288,7 @@ def load_candidate_places_from_db() -> list[CandidatePlace]:
         logger.exception("failed to load candidate places from database; falling back")
         return []
 
-    candidates: list[CandidatePlace] = []
-    for row in rows:
-        raw_category_label = str(row[4]) if row[4] is not None else ""
-        candidates.append(
-            CandidatePlace(
-                id=int(row[0]),
-                external_id=str(row[1]),
-                content_type_id=str(row[2]),
-                name=str(row[3]),
-                category_label=normalize_category_label(raw_category_label, str(row[2])),
-                address=str(row[5]) if row[5] is not None else None,
-                longitude=Decimal(str(row[6])),
-                latitude=Decimal(str(row[7])),
-            )
-        )
+    candidates = rows_to_candidates(rows)
     return candidates
 
 
@@ -452,11 +495,7 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
             candidate_stop(
                 order=patch_stop.order,
                 stay_minutes=patch_stop.stay_minutes,
-                candidate=fallback_candidate_for_unknown_id(
-                    patch_stop.place_id,
-                    planned_day_from_schedule_day(days_by_no[patch_stop.day_no]),
-                    request_context_from_schedule(existing),
-                ),
+                candidate=resolve_place_or_400(patch_stop.place_id),
                 selection_reasons=["update_requested_place"],
             )
         )
@@ -1337,6 +1376,22 @@ def selection_reasons(
     return reasons
 
 
+def resolve_place_or_400(place_id: int) -> CandidatePlace:
+    """장소 id 하나를 후보 풀 또는 DB 에서 해석한다.
+
+    후보 풀은 모듈 로드 시 한 번만 채워지므로 그 뒤 등록된 장소는 들어 있지 않다.
+    존재하지 않는 장소로 일정을 만들면 저장 단계에서 반드시 실패하므로,
+    가짜 장소를 지어내지 않고 400 으로 거절한다.
+    """
+    for candidate in CANDIDATE_POOL:
+        if candidate.id == place_id:
+            return candidate
+    resolved = load_candidate_places_by_ids([place_id]).get(place_id)
+    if resolved is None:
+        raise HTTPException(status_code=400, detail=f"placeId {place_id} does not exist")
+    return resolved
+
+
 def choose_candidate_places(
     planned_day: PlannedDay,
     request: ScheduleCreateRequest,
@@ -1347,10 +1402,21 @@ def choose_candidate_places(
     seen_ids: set[int] = set()
     selected_experience_types: list[str] = []
     selected_semantic_groups: list[str] = []
+    # 후보 풀은 모듈 로드 시 한 번만 채워지므로 그 뒤 등록된 장소는 들어 있지 않다.
+    # 풀에 없는 id 만 DB 에서 한 번에 읽어온다.
+    pool_by_id = {item.id: item for item in CANDIDATE_POOL}
+    missing_ids = [pid for pid in must_visit_ids if pid not in pool_by_id]
+    resolved_from_db = load_candidate_places_by_ids(missing_ids)
+
     for place_id in must_visit_ids:
-        candidate = next((item for item in CANDIDATE_POOL if item.id == place_id), None)
+        candidate = pool_by_id.get(place_id) or resolved_from_db.get(place_id)
         if candidate is None:
-            candidate = fallback_candidate_for_unknown_id(place_id, planned_day, request)
+            # 존재하지 않는 장소로 일정을 만들면 저장 단계에서 반드시 실패한다.
+            # 가짜 장소를 지어내지 않고 요청을 거절한다.
+            raise HTTPException(
+                status_code=400,
+                detail=f"mustVisitPlaceId {place_id} does not exist",
+            )
         resolved.append(candidate)
         seen_ids.add(candidate.id)
         profile = classify_place(candidate.name, candidate.category_label, candidate.content_type_id)
@@ -1431,22 +1497,6 @@ def low_mobility_profile(request: ScheduleCreateRequest) -> bool:
         )
     )
 
-
-def fallback_candidate_for_unknown_id(
-    place_id: int,
-    planned_day: PlannedDay,
-    request: ScheduleCreateRequest,
-) -> CandidatePlace:
-    theme_answer_id = primary_theme_answer_id(request)
-    category_code, category_label = THEME_CATEGORY_LABELS.get(theme_answer_id or "", (None, "미확인"))
-    longitude, latitude = interpolate_point(
-        planned_day.start_location.longitude,
-        planned_day.start_location.latitude,
-        planned_day.end_location.longitude,
-        planned_day.end_location.latitude,
-        1,
-        2,
-    )
 
 
 def trim_or_extend_stops_to_feasible_window(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -1457,7 +1458,11 @@ def choose_candidate_places(
 
     theme_answer_id = primary_theme_answer_id(request)
     ranked = sorted(
-        (candidate for candidate in CANDIDATE_POOL if candidate.id not in seen_ids),
+        (
+            candidate
+            for candidate in CANDIDATE_POOL
+            if candidate.id not in seen_ids and not is_day_endpoint(candidate, planned_day)
+        ),
         key=lambda candidate: candidate_rank(candidate, planned_day, request, theme_answer_id),
     )
     for candidate in ranked:
@@ -1484,6 +1489,42 @@ def choose_candidate_places(
             resolved.append(candidate)
             seen_ids.add(candidate.id)
     return resolved[:target_count]
+
+
+SAME_PLACE_RADIUS_METERS = 300
+COINCIDENT_RADIUS_METERS = 30
+
+
+def normalized_place_name(name: str | None) -> str:
+    if not name:
+        return ""
+    return re.sub(r"[\s·・()\[\]{},\-]", "", name).lower()
+
+
+def is_day_endpoint(candidate: CandidatePlace, planned_day: PlannedDay) -> bool:
+    """후보가 그 일차의 출발지 또는 도착지와 같은 장소인지.
+
+    출발지에 도착해 체류하는 방문지는 의미가 없는데, candidate_rank 의 마지막 정렬
+    기준이 출발·도착지까지의 최단 거리라서 출발지가 장소로 등록돼 있으면 거리 0 으로
+    항상 1순위가 됐다. 실제로 "부산역"에서 출발하는 일정의 첫 방문지가 60분 체류하는
+    "부산역"이었다.
+
+    좌표만으로 판단하지 않는 이유는 같은 장소라도 출처에 따라 좌표가 100m 넘게
+    차이나기 때문이다. 반대로 이름만으로 판단하면 지점명이 같은 다른 장소를 지운다.
+    """
+    for endpoint in (planned_day.start_location, planned_day.end_location):
+        if endpoint is None:
+            continue
+        distance = distance_meters(
+            endpoint.longitude, endpoint.latitude, candidate.longitude, candidate.latitude
+        )
+        if distance <= COINCIDENT_RADIUS_METERS:
+            return True
+        if distance <= SAME_PLACE_RADIUS_METERS and normalized_place_name(
+            endpoint.name
+        ) == normalized_place_name(candidate.name):
+            return True
+    return False
 
 
 def candidate_rank(

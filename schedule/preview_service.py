@@ -422,9 +422,10 @@ def validate_places_exist(place_ids: list[int]) -> None:
     if not place_ids:
         return
     found = load_candidate_places_by_ids(place_ids)
-    if not found:
+    if found is None:
         # DB 를 읽지 못하는 환경에서는 검증을 건너뛴다. 여기서 막으면 조회 실패가
-        # 사용자 입력 오류로 둔갑한다.
+        # 사용자 입력 오류로 둔갑한다. 빈 dict 는 "조회했으나 하나도 없음"이므로
+        # 건너뛰지 않는다.
         return
     missing = [place_id for place_id in place_ids if place_id not in found]
     if missing:

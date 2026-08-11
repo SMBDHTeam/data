@@ -223,22 +223,28 @@ def rows_to_candidates(rows) -> list[CandidatePlace]:
     return candidates
 
 
-def load_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidatePlace]:
+def load_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidatePlace] | None:
     """주어진 id 의 장소를 DB 에서 직접 읽는다.
 
     후보 풀(CANDIDATE_POOL)은 모듈 로드 시 한 번만 채워지므로, 그 뒤에 등록된
     장소는 들어 있지 않다. 사용자가 방금 등록한 장소를 필수 방문지로 지정하면
     후보 풀에서 찾을 수 없어 일정 생성이 실패했다. 그런 id 만 여기서 조회한다.
+
+    반환값은 조회 결과와 조회 불가를 구분한다.
+
+      {...}  조회 성공. 없는 id 는 키에 없다.
+      {}     조회는 됐지만 해당 id 가 하나도 없다.
+      None   DB 를 읽을 수 없다. 호출부는 이 경우 존재 검증을 하면 안 된다.
     """
     if not place_ids:
         return {}
     dsn, username, password = resolve_db_dsn()
     if not dsn:
-        return {}
+        return None
     try:
         import psycopg
     except ModuleNotFoundError:
-        return {}
+        return None
 
     connect_kwargs: dict[str, object] = {"conninfo": dsn, "autocommit": True}
     parsed_dsn = urlsplit(dsn)
@@ -254,7 +260,7 @@ def load_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidatePla
                 rows = cursor.fetchall()
     except Exception:
         logger.exception("failed to load places by id from database. placeIds=%s", place_ids)
-        return {}
+        return None
 
     return {candidate.id: candidate for candidate in rows_to_candidates(rows)}
 
@@ -1386,7 +1392,7 @@ def resolve_place_or_400(place_id: int) -> CandidatePlace:
     for candidate in CANDIDATE_POOL:
         if candidate.id == place_id:
             return candidate
-    resolved = load_candidate_places_by_ids([place_id]).get(place_id)
+    resolved = (load_candidate_places_by_ids([place_id]) or {}).get(place_id)
     if resolved is None:
         raise HTTPException(status_code=400, detail=f"placeId {place_id} does not exist")
     return resolved
@@ -1406,7 +1412,7 @@ def choose_candidate_places(
     # 풀에 없는 id 만 DB 에서 한 번에 읽어온다.
     pool_by_id = {item.id: item for item in CANDIDATE_POOL}
     missing_ids = [pid for pid in must_visit_ids if pid not in pool_by_id]
-    resolved_from_db = load_candidate_places_by_ids(missing_ids)
+    resolved_from_db = load_candidate_places_by_ids(missing_ids) or {}
 
     for place_id in must_visit_ids:
         candidate = pool_by_id.get(place_id) or resolved_from_db.get(place_id)

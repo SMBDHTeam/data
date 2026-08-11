@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ from schedule.persistence import (
 from transit.routing import TransitPoint, find_route
 
 load_runtime_env()
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PLANNING_WARNINGS = [
     "일부 장소 정보는 운영시간과 상세 안내를 방문 전에 다시 확인해 주세요.",
@@ -225,6 +228,7 @@ def load_candidate_places_from_db() -> list[CandidatePlace]:
                 cursor.execute(query)
                 rows = cursor.fetchall()
     except Exception:
+        logger.exception("failed to load candidate places from database; falling back")
         return []
 
     candidates: list[CandidatePlace] = []
@@ -283,6 +287,13 @@ def load_candidate_places() -> tuple[list[CandidatePlace], str]:
 
 
 CANDIDATE_POOL, CANDIDATE_POOL_SOURCE = load_candidate_places()
+
+if CANDIDATE_POOL_SOURCE != "database":
+    logger.warning(
+        "schedule candidate pool is not backed by the database. source=%s count=%s. "
+        "일정 품질이 크게 떨어진다. SPRING_DATASOURCE_* 환경변수를 확인할 것.",
+        CANDIDATE_POOL_SOURCE, len(CANDIDATE_POOL),
+    )
 
 
 class ScheduleStore:
@@ -377,7 +388,10 @@ def create_schedule(
         try:
             save_schedule_to_db(saved, condition_request=request)
         except Exception:
-            pass
+            # 저장에 실패해도 응답은 201 로 나간다. 재시작하면 사라지므로 반드시
+            # 로그로 남긴다. 이 로그가 없어 transit_routes 기본키 충돌을 며칠간
+            # 아무도 알아채지 못했다.
+            logger.exception("failed to persist created schedule. scheduleId=%s", saved.id)
     return saved
 
 
@@ -386,7 +400,7 @@ def list_schedules() -> ScheduleListResponse:
         try:
             return list_schedules_from_db()
         except Exception:
-            pass
+            logger.exception("failed to list schedules from database; falling back to memory store")
     return STORE.list()
 
 
@@ -394,8 +408,14 @@ def get_schedule(schedule_id: UUID) -> ScheduleResponse:
     if db_enabled():
         try:
             return load_schedule_from_db(schedule_id)
+        except HTTPException:
+            # 존재하지 않는 일정의 404 는 정상 응답이므로 그대로 올린다.
+            raise
         except Exception:
-            pass
+            logger.exception(
+                "failed to load schedule from database; falling back to memory store. scheduleId=%s",
+                schedule_id,
+            )
     return STORE.get(schedule_id)
 
 
@@ -461,7 +481,7 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
         try:
             save_schedule_to_db(saved, condition_request=request_context_from_schedule(saved))
         except Exception:
-            pass
+            logger.exception("failed to persist updated schedule. scheduleId=%s", saved.id)
     return saved
 
 

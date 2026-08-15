@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -41,7 +42,9 @@ def search_public_transit_minutes(
 
     request = Request(
         url,
-        headers={"Accept": "application/json"},
+        headers={
+            "Accept": "application/json",
+        },
     )
 
     try:
@@ -49,7 +52,12 @@ def search_public_transit_minutes(
             payload = json.loads(
                 response.read().decode("utf-8")
             )
-    except (HTTPError, URLError, TimeoutError):
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+    ):
         return None
 
     if not isinstance(payload, dict) or "error" in payload:
@@ -61,7 +69,7 @@ def search_public_transit_minutes(
     if not paths:
         return None
 
-    valid_minutes = []
+    valid_minutes: list[int] = []
 
     for path in paths:
         info = path.get("info", {})
@@ -73,14 +81,20 @@ def search_public_transit_minutes(
     if not valid_minutes:
         return None
 
+
     return min(valid_minutes)
+
 
 
 def search_walking_minutes(
     origin: Coordinate,
     destination: Coordinate,
 ) -> int | None:
-    enabled = os.getenv("TMAP_WALKING_ENABLED", "false").lower() == "true"
+    enabled = os.getenv(
+        "TMAP_WALKING_ENABLED",
+        "false",
+    ).lower() == "true"
+
     api_key = os.getenv("SKT_API_KEY", "").strip()
 
     if not enabled or not api_key:
@@ -91,7 +105,11 @@ def search_walking_minutes(
         "https://apis.openapi.sk.com",
     ).rstrip("/")
 
-    url = f"{base_url}/tmap/routes/pedestrian?version=1&format=json"
+    url = (
+        f"{base_url}"
+        "/tmap/routes/pedestrian"
+        "?version=1&format=json"
+    )
 
     payload = {
         "startX": str(origin.longitude),
@@ -118,8 +136,13 @@ def search_walking_minutes(
             result = json.loads(
                 response.read().decode("utf-8"),
                 strict=False,
-    )
-    except (HTTPError, URLError, TimeoutError):
+            )
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+    ):
         return None
 
     features = result.get("features", [])
@@ -139,7 +162,10 @@ def search_walking_minutes(
     if not isinstance(total_seconds, int):
         return None
 
-    return max(1, (total_seconds + 59) // 60)
+    return max(
+        1,
+        (total_seconds + 59) // 60,
+    )
 
 
 def search_car_minutes(
@@ -156,7 +182,11 @@ def search_car_minutes(
         "https://apis.openapi.sk.com",
     ).rstrip("/")
 
-    url = f"{base_url}/tmap/routes?version=1&format=json"
+    url = (
+        f"{base_url}"
+        "/tmap/routes"
+        "?version=1&format=json"
+    )
 
     payload = {
         "startX": str(origin.longitude),
@@ -183,8 +213,13 @@ def search_car_minutes(
             result = json.loads(
                 response.read().decode("utf-8"),
                 strict=False,
-    )
-    except (HTTPError, URLError, TimeoutError):
+            )
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+    ):
         return None
 
     features = result.get("features", [])
@@ -204,22 +239,34 @@ def search_car_minutes(
     if not isinstance(total_seconds, int):
         return None
 
-    return max(1, (total_seconds + 59) // 60)
+
+    return max(
+        1,
+        (total_seconds + 59) // 60,
+    )
+
 
 
 def get_transport_options(
     origin: Coordinate,
     destination: Coordinate,
+    start_at: datetime,
+    return_by: datetime,
 ) -> list[TransportOption]:
+
     options: list[TransportOption] = []
 
-    
+ 
+    total_available_minutes = int(
+        (return_by - start_at).total_seconds() // 60
+    )
+
+
     public_transit_minutes = search_public_transit_minutes(
         origin,
         destination,
     )
 
-    
     public_transit_return_minutes = search_public_transit_minutes(
         destination,
         origin,
@@ -229,12 +276,20 @@ def get_transport_options(
         public_transit_minutes is not None
         and public_transit_return_minutes is not None
     ):
+   
+        available_stay_minutes = (
+            total_available_minutes
+            - public_transit_minutes
+            - public_transit_return_minutes
+        )
+
         options.append(
             TransportOption(
                 mode=TransportMode.PUBLIC_TRANSIT,
                 available=True,
                 outboundMinutes=public_transit_minutes,
                 returnMinutes=public_transit_return_minutes,
+                availableStayMinutes=available_stay_minutes,
                 unavailableReason=None,
             )
         )
@@ -247,13 +302,12 @@ def get_transport_options(
             )
         )
 
-   
+
     walking_minutes = search_walking_minutes(
         origin,
         destination,
     )
 
-    
     walking_return_minutes = search_walking_minutes(
         destination,
         origin,
@@ -263,12 +317,19 @@ def get_transport_options(
         walking_minutes is not None
         and walking_return_minutes is not None
     ):
+        available_stay_minutes = (
+            total_available_minutes
+            - walking_minutes
+            - walking_return_minutes
+        )
+
         options.append(
             TransportOption(
                 mode=TransportMode.WALK,
                 available=True,
                 outboundMinutes=walking_minutes,
                 returnMinutes=walking_return_minutes,
+                availableStayMinutes=available_stay_minutes,
                 unavailableReason=None,
             )
         )
@@ -281,7 +342,6 @@ def get_transport_options(
             )
         )
 
-    
     options.append(
         TransportOption(
             mode=TransportMode.BICYCLE,
@@ -290,7 +350,7 @@ def get_transport_options(
         )
     )
 
-    
+
     car_minutes = search_car_minutes(
         origin,
         destination,
@@ -306,12 +366,19 @@ def get_transport_options(
         car_minutes is not None
         and car_return_minutes is not None
     ):
+        available_stay_minutes = (
+            total_available_minutes
+            - car_minutes
+            - car_return_minutes
+        )
+
         options.append(
             TransportOption(
                 mode=TransportMode.CAR,
                 available=True,
                 outboundMinutes=car_minutes,
                 returnMinutes=car_return_minutes,
+                availableStayMinutes=available_stay_minutes,
                 unavailableReason=None,
             )
         )

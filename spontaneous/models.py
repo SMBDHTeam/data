@@ -28,6 +28,7 @@ class TransportOption(BaseModel):
     available: bool
     outboundMinutes: int | None = None
     returnMinutes: int | None = None
+    availableStayMinutes: int | None = None
     expectedReturnAt: datetime | None = None
     unavailableReason: str | None = None
 

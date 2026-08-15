@@ -131,3 +131,12 @@ DESTINATION_ZONES: List[DestinationZone] = [
         }),
     ),
 ]
+
+def find_destination_zone(
+    destination_id: str,
+) -> DestinationZone | None:
+    for zone in DESTINATION_ZONES:
+        if zone.destination_id == destination_id:
+            return zone
+
+    return None

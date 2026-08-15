@@ -453,3 +453,20 @@ def get_best_travel_minutes(
         return None
 
     return min(available_minutes)
+
+def get_best_stay_minutes(
+    options: list[TransportOption],
+) -> int | None:
+    available_stay_minutes = [
+        option.availableStayMinutes
+        for option in options
+        if (
+            option.available
+            and option.availableStayMinutes is not None
+        )
+    ]
+
+    if not available_stay_minutes:
+        return None
+
+    return max(available_stay_minutes)

@@ -61,6 +61,7 @@ from spontaneous.service import (
 from spontaneous.routing import (
     get_transport_options,
     get_best_travel_minutes,
+    get_best_stay_minutes,
 )
 # -------
 
@@ -597,6 +598,10 @@ def recommend_spontaneous_destinations(
             transport_options
         )
 
+        best_stay_minutes = get_best_stay_minutes(
+            transport_options
+        )
+
         if not has_available_transport:
             continue
 
@@ -608,6 +613,7 @@ def recommend_spontaneous_destinations(
                 "distanceMeters": candidate["distanceMeters"],
                 "score": candidate["score"],
                 "bestTravelMinutes": best_travel_minutes,
+                "bestStayMinutes": best_stay_minutes,
                 "transportOptions": [
                     option.model_dump(mode="json")
                     for option in transport_options

@@ -45,6 +45,22 @@ from schedule.service import (
     update_schedule,
 )
 
+# ------
+
+from spontaneous.models import (
+    SpontaneousDestinationRequest,
+    SpontaneousDestinationResponse,
+)
+
+from spontaneous.destinations import DESTINATION_ZONES
+from spontaneous.service import (
+    calculate_destination_score,
+    coordinate_to_transit_point,
+    zone_to_transit_point,
+    build_public_transit_option,
+)
+# -------
+
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"
 
@@ -517,3 +533,53 @@ def update_schedule_endpoint(schedule_id: UUID, payload: ScheduleUpdateRequest) 
 @app.get("/api/v1/schedules/{schedule_id}/map", response_model=ScheduleMapResponse)
 def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> ScheduleMapResponse:
     return get_schedule_map(schedule_id, dayNo)
+
+# -------
+@app.post("/api/v1/spontaneous-trips/destinations")
+def recommend_spontaneous_destinations(
+    request: SpontaneousDestinationRequest,
+):
+    results = []
+
+    origin = coordinate_to_transit_point(
+        request.currentLocation,
+        "현재 위치",
+    )
+
+    for zone in DESTINATION_ZONES:
+        final_score, theme_score, distance = calculate_destination_score(
+            zone,
+            request.currentLocation,
+            request.desiredThemes,
+        )
+
+        destination = zone_to_transit_point(zone)
+
+        public_transit_option = build_public_transit_option(
+            origin,
+            destination,
+        )
+
+        results.append(
+            {
+                "destinationId": zone.destination_id,
+                "name": zone.name,
+                "themeScore": round(theme_score, 4),
+                "distanceMeters": round(distance),
+                "score": round(final_score, 4),
+                "transportOptions": [
+                    public_transit_option.model_dump(mode="json")
+                ],
+            }
+        )
+
+    results.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    return {
+        "destinations": results
+    }
+
+# ------

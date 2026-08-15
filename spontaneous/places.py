@@ -104,8 +104,9 @@ def infer_place_themes(
         themes.add("FOOD")
 
     seafood_keywords = [
-        "회",
         "횟집",
+        "회센터",
+        "회타운",
         "수산",
         "해산물",
         "자갈치",
@@ -116,22 +117,27 @@ def infer_place_themes(
         "해수욕장",
         "바다",
         "해안",
-        "수변",
+        "비치",
     ]
 
-    if any(
-        keyword in title
-        for keyword in seafood_keywords
+    if (
+        content_type_id in {"38", "39"}
+        and any(
+            keyword in title
+            for keyword in seafood_keywords
+        )
     ):
         themes.add("SEAFOOD")
 
-    if any(
-        keyword in title
-        for keyword in sea_keywords
+
+    if (
+        content_type_id in {"12", "28"}
+        and any(
+            keyword in title
+            for keyword in sea_keywords
+        )
     ):
         themes.add("SEA")
-
-    return themes
 
 
 def filter_places_by_themes(

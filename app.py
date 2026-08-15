@@ -581,6 +581,8 @@ def recommend_spontaneous_destinations(
         transport_options = get_transport_options(
             request.currentLocation,
             destination,
+            request.startAt,
+            request.returnBy,
         )
 
         results.append(

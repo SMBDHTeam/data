@@ -116,8 +116,9 @@ def search_walking_minutes(
     try:
         with urlopen(request, timeout=8) as response:
             result = json.loads(
-                response.read().decode("utf-8")
-            )
+                response.read().decode("utf-8"),
+                strict=False,
+    )
     except (HTTPError, URLError, TimeoutError):
         return None
 
@@ -180,8 +181,9 @@ def search_car_minutes(
     try:
         with urlopen(request, timeout=8) as response:
             result = json.loads(
-                response.read().decode("utf-8")
-            )
+                response.read().decode("utf-8"),
+                strict=False,
+    )
     except (HTTPError, URLError, TimeoutError):
         return None
 

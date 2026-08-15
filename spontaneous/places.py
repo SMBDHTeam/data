@@ -253,12 +253,82 @@ def search_food_detail(
         return {}
 
 
+def enrich_food_themes(
+    place: dict,
+    themes: set[str],
+) -> set[str]:
+    """
+    음식점 상세 정보를 이용해 테마 보강
+    """
+
+    content_type_id = str(
+        place.get("contenttypeid", "")
+    )
+
+    # 음식점만 상세 조회
+    if content_type_id != "39":
+        return themes
+
+    content_id = place.get(
+        "contentid"
+    )
+
+    if not content_id:
+        return themes
+
+    try:
+        detail = search_food_detail(
+            content_id
+        )
+
+    except Exception:
+        return themes
+
+
+    seafood_keywords = [
+        "회",
+        "횟집",
+        "해산물",
+        "수산",
+        "우럭",
+        "광어",
+        "참치",
+        "초밥",
+        "물회",
+        "전복",
+        "장어",
+    ]
+
+
+    menu_text = " ".join(
+        [
+            str(detail.get("firstmenu", "")),
+            str(detail.get("treatmenu", "")),
+        ]
+    )
+
+
+    if any(
+        keyword in menu_text
+        for keyword in seafood_keywords
+    ):
+        themes.add("SEAFOOD")
+
+
+    return themes
+
+
 def convert_to_course_place(
     place: dict,
 ) -> dict:
 
     themes = infer_place_themes(
         place
+    )
+
+    themes = enrich_food_themes(
+        place,
+        themes,
     )
 
     return {

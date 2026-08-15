@@ -267,3 +267,24 @@ def convert_to_course_place(
         "themes": themes,
         "raw": place,
     }
+
+COURSE_CONTENT_TYPES = {
+    "12", # 관광지
+    "14", # 문화시설
+    "15", # 축제공연
+    "28", # 레포츠
+    "38", # 쇼핑
+    "39", # 음식
+}
+
+
+def filter_course_candidates(
+    places: list[dict],
+) -> list[dict]:
+    
+    return [
+        place
+        for place in places
+        if str(place.get("contenttypeid"))
+        in COURSE_CONTENT_TYPES
+    ]

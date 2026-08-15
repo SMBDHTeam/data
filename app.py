@@ -565,11 +565,11 @@ def recommend_spontaneous_destinations(
     )
 
    
-    top_candidates = candidates[:5]
+    # top_candidates = candidates[:5]
 
     results = []
 
-    for candidate in top_candidates:
+    for candidate in candidates:
         zone = candidate["zone"]
 
         destination = Coordinate(
@@ -606,6 +606,9 @@ def recommend_spontaneous_destinations(
                 ],
             }
         )
+
+        if len(results) >= 5:
+            break
 
     return {
         "destinations": results

@@ -172,3 +172,32 @@ def zone_to_transit_point(
         longitude=Decimal(str(zone.center_longitude)),
         latitude=Decimal(str(zone.center_latitude)),
     )
+
+
+def calculate_travel_time_score(minutes: int) -> float:
+    return 1 / (1 + minutes / 30)
+
+
+def calculate_stay_time_score(minutes: int) -> float:
+    return min(minutes / 180, 1.0)
+
+def calculate_final_destination_score(
+    theme_score: float,
+    best_travel_minutes: int,
+    best_stay_minutes: int,
+) -> float:
+    travel_score = calculate_travel_time_score(
+        best_travel_minutes
+    )
+
+    stay_score = calculate_stay_time_score(
+        best_stay_minutes
+    )
+
+    final_score = (
+        theme_score * 0.7
+        + travel_score * 0.2
+        + stay_score * 0.1
+    )
+
+    return final_score

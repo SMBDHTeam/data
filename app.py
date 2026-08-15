@@ -45,6 +45,7 @@ from schedule.service import (
     update_schedule,
 )
 
+
 # ------
 from spontaneous.models import (
     Coordinate,
@@ -56,6 +57,7 @@ from spontaneous.destinations import DESTINATION_ZONES
 
 from spontaneous.service import (
     calculate_destination_score,
+    calculate_final_destination_score,
 )
 
 from spontaneous.routing import (
@@ -594,6 +596,9 @@ def recommend_spontaneous_destinations(
             for option in transport_options
         )
 
+        if not has_available_transport:
+                    continue
+
         best_travel_minutes = get_best_travel_minutes(
             transport_options
         )
@@ -602,8 +607,13 @@ def recommend_spontaneous_destinations(
             transport_options
         )
 
-        if not has_available_transport:
-            continue
+        final_score = calculate_final_destination_score(
+            candidate["themeScore"],
+            best_travel_minutes,
+            best_stay_minutes,
+        )
+
+        
 
         results.append(
             {
@@ -611,7 +621,7 @@ def recommend_spontaneous_destinations(
                 "name": zone.name,
                 "themeScore": candidate["themeScore"],
                 "distanceMeters": candidate["distanceMeters"],
-                "score": candidate["score"],
+                "score": round(final_score, 4),
                 "bestTravelMinutes": best_travel_minutes,
                 "bestStayMinutes": best_stay_minutes,
                 "transportOptions": [
@@ -623,6 +633,12 @@ def recommend_spontaneous_destinations(
 
         if len(results) >= 5:
             break
+
+    results.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
 
     return {
         "destinations": results

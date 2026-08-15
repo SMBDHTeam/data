@@ -79,6 +79,7 @@ jobs:
           SPRING_DATASOURCE_PASSWORD: ${{ secrets.SPRING_DATASOURCE_PASSWORD }}
           ODSAY_API_KEY: ${{ secrets.ODSAY_API_KEY }}
           SKT_API_KEY: ${{ secrets.SKT_API_KEY }}
+          TOUR_API_KEY: ${{ secrets.TOUR_API_KEY }}
 
 
         run: |
@@ -131,6 +132,9 @@ jobs:
             printf 'SPRING_DATASOURCE_PASSWORD=%s\n' "$SPRING_DATASOURCE_PASSWORD"
             printf 'ODSAY_ENABLED=true\n'
             printf 'ODSAY_API_KEY=%s\n' "$ODSAY_API_KEY"
+            if [ -n "${TOUR_API_KEY:-}" ]; then
+            printf 'TOUR_API_KEY=%s\n' "$TOUR_API_KEY"
+            fi
             if [ -n "${SKT_API_KEY:-}" ]; then
               printf 'TMAP_WALKING_ENABLED=true\n'
               printf 'SKT_API_KEY=%s\n' "$SKT_API_KEY"

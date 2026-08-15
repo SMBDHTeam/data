@@ -7,6 +7,10 @@ from time import monotonic
 from typing import Any
 from uuid import UUID
 
+# ---
+from fastapi import FastAPI, HTTPException
+# ---
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -65,6 +69,9 @@ from spontaneous.routing import (
     get_best_travel_minutes,
     get_best_stay_minutes,
 )
+
+from spontaneous.models import SpontaneousCourseRequest
+from spontaneous.destinations import find_destination_zone
 # -------
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -644,4 +651,25 @@ def recommend_spontaneous_destinations(
         "destinations": results
     }
 
+
+@app.post("/api/v1/spontaneous-trips/course")
+def create_spontaneous_course(
+    request: SpontaneousCourseRequest,
+):
+    zone = find_destination_zone(
+        request.destinationId
+    )
+
+    if zone is None:
+        raise HTTPException(
+            status_code=404,
+            detail="DESTINATION_NOT_FOUND",
+        )
+
+    return {
+        "destinationId": zone.destination_id,
+        "name": zone.name,
+        "transportMode": request.transportMode,
+        "message": "course generation ready",
+    }
 # -------

@@ -44,3 +44,11 @@ class DestinationRecommendation(BaseModel):
 
 class SpontaneousDestinationResponse(BaseModel):
     destinations: list[DestinationRecommendation]
+
+class SpontaneousCourseRequest(BaseModel):
+    destinationId: str
+    currentLocation: Coordinate
+    startAt: datetime
+    returnBy: datetime
+    desiredThemes: list[str] = []
+    transportMode: TransportMode

@@ -46,19 +46,19 @@ from schedule.service import (
 )
 
 # ------
-
 from spontaneous.models import (
+    Coordinate,
     SpontaneousDestinationRequest,
     SpontaneousDestinationResponse,
 )
 
 from spontaneous.destinations import DESTINATION_ZONES
+
 from spontaneous.service import (
     calculate_destination_score,
-    coordinate_to_transit_point,
-    zone_to_transit_point,
-    build_public_transit_option,
 )
+
+from spontaneous.routing import get_transport_options
 # -------
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -539,13 +539,9 @@ def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> Sc
 def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
 ):
-    results = []
+    candidates = []
 
-    origin = coordinate_to_transit_point(
-        request.currentLocation,
-        "현재 위치",
-    )
-
+   
     for zone in DESTINATION_ZONES:
         final_score, theme_score, distance = calculate_destination_score(
             zone,
@@ -553,10 +549,37 @@ def recommend_spontaneous_destinations(
             request.desiredThemes,
         )
 
-        destination = zone_to_transit_point(zone)
+        candidates.append(
+            {
+                "zone": zone,
+                "themeScore": round(theme_score, 4),
+                "distanceMeters": round(distance),
+                "score": round(final_score, 4),
+            }
+        )
 
-        public_transit_option = build_public_transit_option(
-            origin,
+    
+    candidates.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+   
+    top_candidates = candidates[:5]
+
+    results = []
+
+    for candidate in top_candidates:
+        zone = candidate["zone"]
+
+        destination = Coordinate(
+            latitude=zone.center_latitude,
+            longitude=zone.center_longitude,
+        )
+
+        
+        transport_options = get_transport_options(
+            request.currentLocation,
             destination,
         )
 
@@ -564,19 +587,15 @@ def recommend_spontaneous_destinations(
             {
                 "destinationId": zone.destination_id,
                 "name": zone.name,
-                "themeScore": round(theme_score, 4),
-                "distanceMeters": round(distance),
-                "score": round(final_score, 4),
+                "themeScore": candidate["themeScore"],
+                "distanceMeters": candidate["distanceMeters"],
+                "score": candidate["score"],
                 "transportOptions": [
-                    public_transit_option.model_dump(mode="json")
+                    option.model_dump(mode="json")
+                    for option in transport_options
                 ],
             }
         )
-
-    results.sort(
-        key=lambda item: item["score"],
-        reverse=True,
-    )
 
     return {
         "destinations": results

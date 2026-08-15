@@ -76,93 +76,6 @@ def search_public_transit_minutes(
     return min(valid_minutes)
 
 
-def get_transport_options(
-    origin: Coordinate,
-    destination: Coordinate,
-) -> list[TransportOption]:
-    options: list[TransportOption] = []
-
-    public_transit_minutes = search_public_transit_minutes(
-        origin,
-        destination,
-    )
-
-    if public_transit_minutes is not None:
-        options.append(
-            TransportOption(
-                mode=TransportMode.PUBLIC_TRANSIT,
-                available=True,
-                outboundMinutes=public_transit_minutes,
-                unavailableReason=None,
-            )
-        )
-    else:
-        options.append(
-            TransportOption(
-                mode=TransportMode.PUBLIC_TRANSIT,
-                available=False,
-                unavailableReason="NO_ROUTE",
-            )
-        )
-
-    walking_minutes = search_walking_minutes(
-    origin,
-    destination,
-)
-
-    if walking_minutes is not None:
-        options.append(
-            TransportOption(
-                mode=TransportMode.WALK,
-                available=True,
-                outboundMinutes=walking_minutes,
-                unavailableReason=None,
-            )
-        )
-    else:
-        options.append(
-            TransportOption(
-                mode=TransportMode.WALK,
-                available=False,
-                unavailableReason="NO_ROUTE",
-            )
-        )
-
-    options.append(
-        TransportOption(
-            mode=TransportMode.BICYCLE,
-            available=False,
-            unavailableReason="NOT_IMPLEMENTED",
-        )
-    )
-
-    car_minutes = search_car_minutes(
-    origin,
-    destination,
-)
-
-    if car_minutes is not None:
-        options.append(
-            TransportOption(
-                mode=TransportMode.CAR,
-                available=True,
-                outboundMinutes=car_minutes,
-                unavailableReason=None,
-            )
-        )
-    else:
-        options.append(
-            TransportOption(
-                mode=TransportMode.CAR,
-                available=False,
-                unavailableReason="NO_ROUTE",
-            )
-        )
-
-    return options
-
-
-
 def search_walking_minutes(
     origin: Coordinate,
     destination: Coordinate,
@@ -228,7 +141,6 @@ def search_walking_minutes(
     return max(1, (total_seconds + 59) // 60)
 
 
-
 def search_car_minutes(
     origin: Coordinate,
     destination: Coordinate,
@@ -291,3 +203,123 @@ def search_car_minutes(
         return None
 
     return max(1, (total_seconds + 59) // 60)
+
+
+def get_transport_options(
+    origin: Coordinate,
+    destination: Coordinate,
+) -> list[TransportOption]:
+    options: list[TransportOption] = []
+
+    
+    public_transit_minutes = search_public_transit_minutes(
+        origin,
+        destination,
+    )
+
+    
+    public_transit_return_minutes = search_public_transit_minutes(
+        destination,
+        origin,
+    )
+
+    if (
+        public_transit_minutes is not None
+        and public_transit_return_minutes is not None
+    ):
+        options.append(
+            TransportOption(
+                mode=TransportMode.PUBLIC_TRANSIT,
+                available=True,
+                outboundMinutes=public_transit_minutes,
+                returnMinutes=public_transit_return_minutes,
+                unavailableReason=None,
+            )
+        )
+    else:
+        options.append(
+            TransportOption(
+                mode=TransportMode.PUBLIC_TRANSIT,
+                available=False,
+                unavailableReason="NO_ROUTE",
+            )
+        )
+
+   
+    walking_minutes = search_walking_minutes(
+        origin,
+        destination,
+    )
+
+    
+    walking_return_minutes = search_walking_minutes(
+        destination,
+        origin,
+    )
+
+    if (
+        walking_minutes is not None
+        and walking_return_minutes is not None
+    ):
+        options.append(
+            TransportOption(
+                mode=TransportMode.WALK,
+                available=True,
+                outboundMinutes=walking_minutes,
+                returnMinutes=walking_return_minutes,
+                unavailableReason=None,
+            )
+        )
+    else:
+        options.append(
+            TransportOption(
+                mode=TransportMode.WALK,
+                available=False,
+                unavailableReason="NO_ROUTE",
+            )
+        )
+
+    
+    options.append(
+        TransportOption(
+            mode=TransportMode.BICYCLE,
+            available=False,
+            unavailableReason="NOT_IMPLEMENTED",
+        )
+    )
+
+    
+    car_minutes = search_car_minutes(
+        origin,
+        destination,
+    )
+
+   
+    car_return_minutes = search_car_minutes(
+        destination,
+        origin,
+    )
+
+    if (
+        car_minutes is not None
+        and car_return_minutes is not None
+    ):
+        options.append(
+            TransportOption(
+                mode=TransportMode.CAR,
+                available=True,
+                outboundMinutes=car_minutes,
+                returnMinutes=car_return_minutes,
+                unavailableReason=None,
+            )
+        )
+    else:
+        options.append(
+            TransportOption(
+                mode=TransportMode.CAR,
+                available=False,
+                unavailableReason="NO_ROUTE",
+            )
+        )
+
+    return options

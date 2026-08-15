@@ -85,7 +85,6 @@ def infer_place_themes(
         place.get("title", "")
     ).upper()
 
-    # TourAPI 콘텐츠 타입 기반
     if content_type_id == "12":
         themes.add("WALK")
 
@@ -102,7 +101,14 @@ def infer_place_themes(
         themes.add("SHOPPING")
 
     elif content_type_id == "39":
-        themes.add("FOOD")
+        cat3 = str(
+            place.get("cat3", "")
+        )
+
+        if cat3 == "A05020900":
+            themes.add("CAFE")
+        else:
+            themes.add("FOOD")
 
     seafood_keywords = [
         "횟집",

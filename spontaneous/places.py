@@ -85,6 +85,7 @@ def infer_place_themes(
         place.get("title", "")
     ).upper()
 
+    # TourAPI 콘텐츠 타입 기반
     if content_type_id == "12":
         themes.add("WALK")
 
@@ -129,7 +130,6 @@ def infer_place_themes(
     ):
         themes.add("SEAFOOD")
 
-
     if (
         content_type_id in {"12", "28"}
         and any(
@@ -138,6 +138,8 @@ def infer_place_themes(
         )
     ):
         themes.add("SEA")
+
+    return themes
 
 
 def filter_places_by_themes(

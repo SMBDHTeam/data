@@ -603,4 +603,4 @@ def recommend_spontaneous_destinations(
         "destinations": results
     }
 
-# ------
+# -------

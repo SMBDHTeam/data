@@ -585,6 +585,14 @@ def recommend_spontaneous_destinations(
             request.returnBy,
         )
 
+        has_available_transport = any(
+            option.available
+            for option in transport_options
+        )
+
+        if not has_available_transport:
+            continue
+
         results.append(
             {
                 "destinationId": zone.destination_id,

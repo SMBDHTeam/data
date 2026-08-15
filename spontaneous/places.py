@@ -9,6 +9,28 @@ from spontaneous.destinations import DestinationZone
 TOUR_API_BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
 
 
+
+COURSE_CONTENT_TYPE_IDS = {
+    "12",  # 관광지
+    "14",  # 문화시설
+    "15",  # 축제/공연
+    "28",  # 레포츠
+    "38",  # 쇼핑
+    "39",  # 음식점
+}
+
+
+def filter_course_places(
+    places: list[dict],
+) -> list[dict]:
+    return [
+        place
+        for place in places
+        if str(place.get("contenttypeid")) in COURSE_CONTENT_TYPE_IDS
+    ]
+
+
+
 def search_places_by_zone(
     zone: DestinationZone,
 ) -> list[dict]:
@@ -48,3 +70,88 @@ def search_places_by_zone(
         return []
 
     return items.get("item", [])
+
+
+def infer_place_themes(
+    place: dict,
+) -> set[str]:
+    themes: set[str] = set()
+
+    content_type_id = str(
+        place.get("contenttypeid", "")
+    )
+
+    title = str(
+        place.get("title", "")
+    ).upper()
+
+    if content_type_id == "12":
+        themes.add("WALK")
+
+    elif content_type_id == "14":
+        themes.add("CULTURE")
+
+    elif content_type_id == "15":
+        themes.add("CULTURE")
+
+    elif content_type_id == "28":
+        themes.add("ACTIVITY")
+
+    elif content_type_id == "38":
+        themes.add("SHOPPING")
+
+    elif content_type_id == "39":
+        themes.add("FOOD")
+
+    seafood_keywords = [
+        "회",
+        "횟집",
+        "수산",
+        "해산물",
+        "자갈치",
+    ]
+
+    sea_keywords = [
+        "해변",
+        "해수욕장",
+        "바다",
+        "해안",
+        "수변",
+    ]
+
+    if any(
+        keyword in title
+        for keyword in seafood_keywords
+    ):
+        themes.add("SEAFOOD")
+
+    if any(
+        keyword in title
+        for keyword in sea_keywords
+    ):
+        themes.add("SEA")
+
+    return themes
+
+
+def filter_places_by_themes(
+    places: list[dict],
+    desired_themes: list[str],
+) -> list[dict]:
+    if not desired_themes:
+        return places
+
+    desired_set = {
+        theme.upper()
+        for theme in desired_themes
+    }
+
+    matched_places = []
+
+    for place in places:
+        place_themes = infer_place_themes(place)
+
+        if desired_set.intersection(place_themes):
+            matched_places.append(place)
+
+    return matched_places

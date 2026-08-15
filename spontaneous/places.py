@@ -334,7 +334,17 @@ def convert_to_course_place(
     return {
         "name": place.get("title"),
         "contentId": place.get("contentid"),
+
+        "latitude": float(
+            place.get("mapy", 0)
+        ),
+
+        "longitude": float(
+            place.get("mapx", 0)
+        ),
+
         "themes": themes,
+
         "raw": place,
     }
 

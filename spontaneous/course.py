@@ -1,4 +1,77 @@
 from typing import Set
+from math import asin, cos, radians, sin, sqrt
+
+
+
+
+EARTH_RADIUS_METERS = 6371000
+
+
+def calculate_distance_meters(
+    origin: dict,
+    destination: dict,
+) -> float:
+    """
+    두 좌표 거리 계산
+    """
+
+    lat1 = radians(
+        origin["latitude"]
+    )
+
+    lon1 = radians(
+        origin["longitude"]
+    )
+
+    lat2 = radians(
+        destination["latitude"]
+    )
+
+    lon2 = radians(
+        destination["longitude"]
+    )
+
+
+    delta_lat = lat2 - lat1
+    delta_lon = lon2 - lon1
+
+
+    value = (
+        sin(delta_lat / 2) ** 2
+        +
+        cos(lat1)
+        *
+        cos(lat2)
+        *
+        sin(delta_lon / 2) ** 2
+    )
+
+
+    central_angle = 2 * asin(
+        sqrt(value)
+    )
+
+
+    return EARTH_RADIUS_METERS * central_angle
+
+
+
+def calculate_distance_score(
+    distance_meters: float,
+) -> float:
+    """
+    가까울수록 높은 점수
+
+    0km = 1
+    10km 이상 = 낮음
+    """
+
+    km = distance_meters / 1000
+
+    return 1 / (
+        1 + km / 10
+    )
+
 
 
 def classify_place_role(
@@ -177,9 +250,11 @@ def calculate_place_score(
 
 
     final_score = (
-        theme_score * 0.6
-        +
-        type_score * 0.4
+    theme_score * 0.4
+    +
+    type_score * 0.2
+    +
+    distance_score * 0.4
     )
 
 

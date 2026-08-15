@@ -373,6 +373,7 @@ def generate_course(
                             selected,
                             desired_themes,
                             role,
+                            current_location,
                         ),
                         4
                     ),

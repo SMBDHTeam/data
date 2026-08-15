@@ -148,6 +148,40 @@ def infer_place_themes(
     return themes
 
 
+def infer_food_themes(
+    detail: dict,
+) -> set[str]:
+    themes: set[str] = set()
+
+    text = " ".join(
+        [
+            str(detail.get("firstmenu", "")),
+            str(detail.get("treatmenu", "")),
+        ]
+    ).upper()
+
+    seafood_keywords = [
+        "회",
+        "생선",
+        "우럭",
+        "광어",
+        "연어",
+        "참치",
+        "해산물",
+        "수산",
+        "조개",
+        "전복",
+        "장어",
+    ]
+
+    if any(
+        keyword.upper() in text
+        for keyword in seafood_keywords
+    ):
+        themes.add("SEAFOOD")
+
+    return themes
+
 def filter_places_by_themes(
     places: list[dict],
     desired_themes: list[str],
@@ -169,3 +203,67 @@ def filter_places_by_themes(
             matched_places.append(place)
 
     return matched_places
+
+
+def search_food_detail(
+    content_id: str,
+) -> dict:
+    service_key = os.getenv("TOUR_API_KEY")
+
+    if not service_key:
+        raise RuntimeError("TOUR_API_KEY is missing")
+
+    params = {
+        "serviceKey": service_key,
+        "MobileOS": "ETC",
+        "MobileApp": "BusanTour",
+        "_type": "json",
+        "contentId": content_id,
+        "contentTypeId": "39",
+    }
+
+    url = (
+        f"{TOUR_API_BASE_URL}/detailIntro2"
+        f"?{urlencode(params)}"
+    )
+
+    try:
+        with urlopen(url, timeout=10) as response:
+            data = json.loads(
+                response.read().decode("utf-8")
+            )
+
+    except Exception:
+        return {}
+
+    try:
+        items = (
+            data["response"]
+            ["body"]
+            ["items"]
+            ["item"]
+        )
+
+        if not items:
+            return {}
+
+        return items[0]
+
+    except (KeyError, IndexError, TypeError):
+        return {}
+
+
+def convert_to_course_place(
+    place: dict,
+) -> dict:
+
+    themes = infer_place_themes(
+        place
+    )
+
+    return {
+        "name": place.get("title"),
+        "contentId": place.get("contentid"),
+        "themes": themes,
+        "raw": place,
+    }

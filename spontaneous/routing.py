@@ -12,6 +12,7 @@ from spontaneous.models import (
     TransportOption,
 )
 
+MIN_STAY_MINUTES = 60
 
 def search_public_transit_minutes(
     origin: Coordinate,
@@ -256,7 +257,7 @@ def get_transport_options(
 
     options: list[TransportOption] = []
 
- 
+   
     total_available_minutes = int(
         (return_by - start_at).total_seconds() // 60
     )
@@ -276,23 +277,36 @@ def get_transport_options(
         public_transit_minutes is not None
         and public_transit_return_minutes is not None
     ):
-   
         available_stay_minutes = (
             total_available_minutes
             - public_transit_minutes
             - public_transit_return_minutes
         )
 
-        options.append(
-            TransportOption(
-                mode=TransportMode.PUBLIC_TRANSIT,
-                available=True,
-                outboundMinutes=public_transit_minutes,
-                returnMinutes=public_transit_return_minutes,
-                availableStayMinutes=available_stay_minutes,
-                unavailableReason=None,
+       
+        if available_stay_minutes < MIN_STAY_MINUTES:
+            options.append(
+                TransportOption(
+                    mode=TransportMode.PUBLIC_TRANSIT,
+                    available=False,
+                    outboundMinutes=public_transit_minutes,
+                    returnMinutes=public_transit_return_minutes,
+                    availableStayMinutes=available_stay_minutes,
+                    unavailableReason="INSUFFICIENT_STAY_TIME",
+                )
             )
-        )
+        else:
+            options.append(
+                TransportOption(
+                    mode=TransportMode.PUBLIC_TRANSIT,
+                    available=True,
+                    outboundMinutes=public_transit_minutes,
+                    returnMinutes=public_transit_return_minutes,
+                    availableStayMinutes=available_stay_minutes,
+                    unavailableReason=None,
+                )
+            )
+
     else:
         options.append(
             TransportOption(
@@ -302,6 +316,7 @@ def get_transport_options(
             )
         )
 
+   
 
     walking_minutes = search_walking_minutes(
         origin,
@@ -323,16 +338,29 @@ def get_transport_options(
             - walking_return_minutes
         )
 
-        options.append(
-            TransportOption(
-                mode=TransportMode.WALK,
-                available=True,
-                outboundMinutes=walking_minutes,
-                returnMinutes=walking_return_minutes,
-                availableStayMinutes=available_stay_minutes,
-                unavailableReason=None,
+        if available_stay_minutes < MIN_STAY_MINUTES:
+            options.append(
+                TransportOption(
+                    mode=TransportMode.WALK,
+                    available=False,
+                    outboundMinutes=walking_minutes,
+                    returnMinutes=walking_return_minutes,
+                    availableStayMinutes=available_stay_minutes,
+                    unavailableReason="INSUFFICIENT_STAY_TIME",
+                )
             )
-        )
+        else:
+            options.append(
+                TransportOption(
+                    mode=TransportMode.WALK,
+                    available=True,
+                    outboundMinutes=walking_minutes,
+                    returnMinutes=walking_return_minutes,
+                    availableStayMinutes=available_stay_minutes,
+                    unavailableReason=None,
+                )
+            )
+
     else:
         options.append(
             TransportOption(
@@ -342,6 +370,8 @@ def get_transport_options(
             )
         )
 
+   
+
     options.append(
         TransportOption(
             mode=TransportMode.BICYCLE,
@@ -350,13 +380,13 @@ def get_transport_options(
         )
     )
 
+   
 
     car_minutes = search_car_minutes(
         origin,
         destination,
     )
 
-   
     car_return_minutes = search_car_minutes(
         destination,
         origin,
@@ -372,16 +402,29 @@ def get_transport_options(
             - car_return_minutes
         )
 
-        options.append(
-            TransportOption(
-                mode=TransportMode.CAR,
-                available=True,
-                outboundMinutes=car_minutes,
-                returnMinutes=car_return_minutes,
-                availableStayMinutes=available_stay_minutes,
-                unavailableReason=None,
+        if available_stay_minutes < MIN_STAY_MINUTES:
+            options.append(
+                TransportOption(
+                    mode=TransportMode.CAR,
+                    available=False,
+                    outboundMinutes=car_minutes,
+                    returnMinutes=car_return_minutes,
+                    availableStayMinutes=available_stay_minutes,
+                    unavailableReason="INSUFFICIENT_STAY_TIME",
+                )
             )
-        )
+        else:
+            options.append(
+                TransportOption(
+                    mode=TransportMode.CAR,
+                    available=True,
+                    outboundMinutes=car_minutes,
+                    returnMinutes=car_return_minutes,
+                    availableStayMinutes=available_stay_minutes,
+                    unavailableReason=None,
+                )
+            )
+
     else:
         options.append(
             TransportOption(

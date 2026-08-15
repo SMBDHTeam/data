@@ -58,7 +58,10 @@ from spontaneous.service import (
     calculate_destination_score,
 )
 
-from spontaneous.routing import get_transport_options
+from spontaneous.routing import (
+    get_transport_options,
+    get_best_travel_minutes,
+)
 # -------
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -590,6 +593,10 @@ def recommend_spontaneous_destinations(
             for option in transport_options
         )
 
+        best_travel_minutes = get_best_travel_minutes(
+            transport_options
+        )
+
         if not has_available_transport:
             continue
 
@@ -600,6 +607,7 @@ def recommend_spontaneous_destinations(
                 "themeScore": candidate["themeScore"],
                 "distanceMeters": candidate["distanceMeters"],
                 "score": candidate["score"],
+                "bestTravelMinutes": best_travel_minutes,
                 "transportOptions": [
                     option.model_dump(mode="json")
                     for option in transport_options

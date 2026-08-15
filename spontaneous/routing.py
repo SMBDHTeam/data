@@ -435,3 +435,21 @@ def get_transport_options(
         )
 
     return options
+
+
+def get_best_travel_minutes(
+    options: list[TransportOption],
+) -> int | None:
+    available_minutes = [
+        option.outboundMinutes
+        for option in options
+        if (
+            option.available
+            and option.outboundMinutes is not None
+        )
+    ]
+
+    if not available_minutes:
+        return None
+
+    return min(available_minutes)

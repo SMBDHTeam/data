@@ -227,34 +227,38 @@ def calculate_place_score(
     place: dict,
     desired_themes: set[str],
     role: str,
+    current_location: dict,
 ) -> float:
-    """
-    최종 장소 점수
-
-    현재 기준:
-
-    테마 적합도 60%
-    역할 적합도 40%
-    """
 
     theme_score = calculate_theme_score(
         place,
         desired_themes,
     )
 
-
     type_score = calculate_place_type_score(
         place,
         role,
     )
 
+    distance = calculate_distance_meters(
+        current_location,
+        {
+            "latitude": place.get("latitude"),
+            "longitude": place.get("longitude"),
+        },
+    )
+
+    distance_score = calculate_distance_score(
+        distance
+    )
+
 
     final_score = (
-    theme_score * 0.4
-    +
-    type_score * 0.2
-    +
-    distance_score * 0.4
+        theme_score * 0.4
+        +
+        type_score * 0.2
+        +
+        distance_score * 0.4
     )
 
 
@@ -266,6 +270,7 @@ def select_best_place(
     places: list[dict],
     desired_themes: set[str],
     role: str,
+    current_location,
 ) -> dict | None:
     """
     역할별 후보 중
@@ -283,6 +288,7 @@ def select_best_place(
                 place,
                 desired_themes,
                 role,
+                current_location,
             )
     )
 
@@ -291,6 +297,7 @@ def select_best_place(
 def generate_course(
     grouped_places: dict[str, list[dict]],
     desired_themes: set[str],
+    current_location,
 ) -> list[dict]:
     """
     코스 생성
@@ -335,6 +342,7 @@ def generate_course(
             places,
             desired_themes,
             role,
+            current_location,
         )
 
 

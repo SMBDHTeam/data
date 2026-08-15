@@ -8,10 +8,10 @@ def classify_place_role(
     장소 테마 기반 역할 분류
 
     역할:
-    - ACTIVITY : 관광, 산책, 바다
-    - MEAL     : 음식점
-    - CAFE     : 카페
-    - NIGHT_VIEW : 야경
+    ACTIVITY : 관광 / 산책 / 바다
+    MEAL     : 음식
+    CAFE     : 카페
+    NIGHT_VIEW : 야경
     """
 
     if "SEAFOOD" in place_themes or "FOOD" in place_themes:
@@ -29,25 +29,31 @@ def classify_place_role(
     return "ETC"
 
 
+
 def group_places_by_role(
     places: list[dict],
 ) -> dict[str, list[dict]]:
     """
-    장소 리스트를 역할별로 그룹화
+    장소를 역할별로 그룹화
 
-    예:
+    결과:
+
     {
-        "ACTIVITY": [...],
-        "MEAL": [...],
-        "CAFE": [...]
+        ACTIVITY: [],
+        MEAL: [],
+        CAFE: []
     }
     """
 
     grouped = {}
 
     for place in places:
+
         role = classify_place_role(
-            place.get("themes", set())
+            place.get(
+                "themes",
+                set()
+            )
         )
 
         if role not in grouped:
@@ -58,25 +64,25 @@ def group_places_by_role(
     return grouped
 
 
-def calculate_place_score(
+
+def calculate_theme_score(
     place: dict,
     desired_themes: set[str],
 ) -> float:
     """
-    장소 테마 적합도 점수
-
-    현재:
-    테마 매칭 비율만 계산
+    사용자 원하는 테마와
+    장소 테마 매칭 점수
 
     예:
-    장소:
-    {FOOD, SEAFOOD}
 
-    요청:
-    {SEAFOOD, SEA}
+    원하는:
+    SEAFOOD, SEA
+
+    장소:
+    SEAFOOD, FOOD
 
     결과:
-    1 / 2 = 0.5
+    0.5
     """
 
     place_themes = place.get(
@@ -87,23 +93,113 @@ def calculate_place_score(
     if not place_themes:
         return 0.0
 
+
     matched = desired_themes.intersection(
         place_themes
     )
 
-    return len(matched) / len(desired_themes)
+
+    return len(matched) / len(
+        desired_themes
+    )
+
+
+
+def calculate_place_type_score(
+    place: dict,
+    role: str,
+) -> float:
+    """
+    역할 적합도 점수
+    """
+
+    themes = place.get(
+        "themes",
+        set()
+    )
+
+
+    if role == "MEAL":
+
+        if "FOOD" in themes:
+            return 1.0
+
+
+    if role == "CAFE":
+
+        if "CAFE" in themes:
+            return 1.0
+
+
+    if role == "ACTIVITY":
+
+        if (
+            "SEA" in themes
+            or "WALK" in themes
+        ):
+            return 1.0
+
+
+    if role == "NIGHT_VIEW":
+
+        if "NIGHT_VIEW" in themes:
+            return 1.0
+
+
+    return 0.0
+
+
+
+def calculate_place_score(
+    place: dict,
+    desired_themes: set[str],
+    role: str,
+) -> float:
+    """
+    최종 장소 점수
+
+    현재 기준:
+
+    테마 적합도 60%
+    역할 적합도 40%
+    """
+
+    theme_score = calculate_theme_score(
+        place,
+        desired_themes,
+    )
+
+
+    type_score = calculate_place_type_score(
+        place,
+        role,
+    )
+
+
+    final_score = (
+        theme_score * 0.6
+        +
+        type_score * 0.4
+    )
+
+
+    return final_score
+
 
 
 def select_best_place(
     places: list[dict],
     desired_themes: set[str],
+    role: str,
 ) -> dict | None:
     """
-    역할별 후보 중 가장 적합한 장소 선택
+    역할별 후보 중
+    가장 적합한 장소 선택
     """
 
     if not places:
         return None
+
 
     return max(
         places,
@@ -111,8 +207,10 @@ def select_best_place(
             calculate_place_score(
                 place,
                 desired_themes,
+                role,
             )
     )
+
 
 
 def generate_course(
@@ -120,9 +218,9 @@ def generate_course(
     desired_themes: set[str],
 ) -> list[dict]:
     """
-    역할 기반 코스 생성
+    코스 생성
 
-    현재 규칙:
+    기본 패턴:
 
     ACTIVITY
         ↓
@@ -138,6 +236,7 @@ def generate_course(
 
     order = 1
 
+
     patterns = [
         ("ACTIVITY", 60),
         ("MEAL", 90),
@@ -145,38 +244,60 @@ def generate_course(
         ("NIGHT_VIEW", 40),
     ]
 
+
     for role, stay_minutes in patterns:
 
-        places = grouped_places.get(role)
+        places = grouped_places.get(
+            role
+        )
+
 
         if not places:
             continue
 
+
         selected = select_best_place(
             places,
             desired_themes,
+            role,
         )
+
 
         if not selected:
             continue
+
 
         course.append(
             {
                 "order": order,
                 "role": role,
-                "name": selected.get("name")
-                or selected.get("title"),
+                "name":
+                    selected.get("name")
+                    or selected.get("title"),
+
                 "stayMinutes": stay_minutes,
+
                 "themes": list(
                     selected.get(
                         "themes",
                         set()
                     )
                 ),
+
+                "score":
+                    round(
+                        calculate_place_score(
+                            selected,
+                            desired_themes,
+                            role,
+                        ),
+                        4
+                    ),
             }
         )
 
+
         order += 1
 
+
     return course
-    

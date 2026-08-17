@@ -315,8 +315,8 @@ def generate_course(
     """
 
     course = []
-
     order = 1
+    cursor_location = dict(current_location)
 
 
     patterns = [
@@ -342,7 +342,7 @@ def generate_course(
             places,
             desired_themes,
             role,
-            current_location,
+            cursor_location,
         )
 
 
@@ -376,12 +376,17 @@ def generate_course(
                             selected,
                             desired_themes,
                             role,
-                            current_location,
+                            cursor_location,
                         ),
                         4
                     ),
             }
         )
+
+        cursor_location = {
+            "latitude": selected.get("latitude"),
+            "longitude": selected.get("longitude"),
+        }
 
 
         order += 1

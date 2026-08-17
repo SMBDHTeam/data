@@ -82,19 +82,6 @@ def calculate_theme_match_score(
     return len(matched) / len(desired_set)
 
 
-def calculate_theme_match_score(
-    zone: DestinationZone,
-    desired_themes: list[str],
-) -> float:
-    if not desired_themes:
-        return 0.0
-
-    desired_set = {theme.upper() for theme in desired_themes}
-    matched = desired_set.intersection(zone.themes)
-
-    return len(matched) / len(desired_set)
-
-
 def calculate_distance_score(distance_meters_value: float) -> float:
     distance_km = distance_meters_value / 1000
 

@@ -7,10 +7,6 @@ from time import monotonic
 from typing import Any
 from uuid import UUID
 
-# ---
-from fastapi import FastAPI, HTTPException
-# ---
-
 import joblib
 import numpy as np
 import pandas as pd
@@ -72,7 +68,12 @@ from spontaneous.routing import (
 
 from spontaneous.models import SpontaneousCourseRequest
 from spontaneous.destinations import find_destination_zone
-# -------
+from spontaneous.places import (
+    convert_to_course_place,
+    filter_course_candidates,
+    search_places_by_zone,
+)
+from spontaneous.course import generate_course, group_places_by_role
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"
@@ -656,6 +657,7 @@ def recommend_spontaneous_destinations(
 def create_spontaneous_course(
     request: SpontaneousCourseRequest,
 ):
+    started_at = monotonic()
     zone = find_destination_zone(
         request.destinationId
     )
@@ -666,10 +668,60 @@ def create_spontaneous_course(
             detail="DESTINATION_NOT_FOUND",
         )
 
+    destination = Coordinate(
+        latitude=zone.center_latitude,
+        longitude=zone.center_longitude,
+    )
+
+    transport_options = get_transport_options(
+        request.currentLocation,
+        destination,
+        request.startAt,
+        request.returnBy,
+    )
+    selected_transport = next(
+        (option for option in transport_options if option.mode == request.transportMode),
+        None,
+    )
+
+    if selected_transport is None or not selected_transport.available:
+        raise HTTPException(
+            status_code=400,
+            detail="TRANSPORT_MODE_UNAVAILABLE",
+        )
+
+    try:
+        raw_places = search_places_by_zone(zone)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("spontaneous course place search failed. destinationId=%s", request.destinationId)
+        raise HTTPException(status_code=502, detail="PLACE_SEARCH_FAILED") from exc
+
+    course_candidates = filter_course_candidates(raw_places)
+    converted_places = [convert_to_course_place(place) for place in course_candidates]
+    grouped_places = group_places_by_role(converted_places)
+    generated_course = generate_course(
+        grouped_places,
+        {theme.upper() for theme in request.desiredThemes},
+        {
+            "latitude": request.currentLocation.latitude,
+            "longitude": request.currentLocation.longitude,
+        },
+    )
+
+    log.info(
+        "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, elapsedMs=%d",
+        request.destinationId,
+        request.transportMode,
+        len(generated_course),
+        int((monotonic() - started_at) * 1000),
+    )
+
     return {
         "destinationId": zone.destination_id,
         "name": zone.name,
         "transportMode": request.transportMode,
-        "message": "course generation ready",
+        "transport": selected_transport.model_dump(mode="json"),
+        "course": generated_course,
     }
-# -------

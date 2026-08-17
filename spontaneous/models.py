@@ -20,7 +20,7 @@ class SpontaneousDestinationRequest(BaseModel):
     currentLocation: Coordinate
     startAt: datetime
     returnBy: datetime
-    desiredThemes: list[str] = []
+    desiredThemes: list[str] = Field(default_factory=list)
 
 
 class TransportOption(BaseModel):
@@ -39,7 +39,7 @@ class DestinationRecommendation(BaseModel):
     themeScore: float
     distanceMeters: int
     score: float
-    transportOptions: list[TransportOption] = []
+    transportOptions: list[TransportOption] = Field(default_factory=list)
 
 
 class SpontaneousDestinationResponse(BaseModel):
@@ -50,5 +50,5 @@ class SpontaneousCourseRequest(BaseModel):
     currentLocation: Coordinate
     startAt: datetime
     returnBy: datetime
-    desiredThemes: list[str] = []
+    desiredThemes: list[str] = Field(default_factory=list)
     transportMode: TransportMode

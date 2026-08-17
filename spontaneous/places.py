@@ -148,40 +148,6 @@ def infer_place_themes(
     return themes
 
 
-def infer_food_themes(
-    detail: dict,
-) -> set[str]:
-    themes: set[str] = set()
-
-    text = " ".join(
-        [
-            str(detail.get("firstmenu", "")),
-            str(detail.get("treatmenu", "")),
-        ]
-    ).upper()
-
-    seafood_keywords = [
-        "회",
-        "생선",
-        "우럭",
-        "광어",
-        "연어",
-        "참치",
-        "해산물",
-        "수산",
-        "조개",
-        "전복",
-        "장어",
-    ]
-
-    if any(
-        keyword.upper() in text
-        for keyword in seafood_keywords
-    ):
-        themes.add("SEAFOOD")
-
-    return themes
-
 def filter_places_by_themes(
     places: list[dict],
     desired_themes: list[str],

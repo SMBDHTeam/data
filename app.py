@@ -44,9 +44,6 @@ from schedule.service import (
     list_schedules,
     update_schedule,
 )
-
-
-# ------
 from spontaneous.models import (
     Coordinate,
     SpontaneousCourseRequest,
@@ -548,13 +545,12 @@ def update_schedule_endpoint(schedule_id: UUID, payload: ScheduleUpdateRequest) 
 def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> ScheduleMapResponse:
     return get_schedule_map(schedule_id, dayNo)
 
+
 @app.post("/api/v1/spontaneous-trips/destinations", response_model=SpontaneousDestinationResponse)
 def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
 ) -> SpontaneousDestinationResponse:
     candidates = []
-
-   
     for zone in DESTINATION_ZONES:
         final_score, theme_score, distance = calculate_destination_score(
             zone,
@@ -571,26 +567,18 @@ def recommend_spontaneous_destinations(
             }
         )
 
-    
     candidates.sort(
         key=lambda item: item["score"],
         reverse=True,
     )
 
-   
-    # top_candidates = candidates[:5]
-
     results = []
-
     for candidate in candidates:
         zone = candidate["zone"]
-
         destination = Coordinate(
             latitude=zone.center_latitude,
             longitude=zone.center_longitude,
         )
-
-        
         transport_options = get_transport_options(
             request.currentLocation,
             destination,
@@ -602,14 +590,12 @@ def recommend_spontaneous_destinations(
             option.available
             for option in transport_options
         )
-
         if not has_available_transport:
-                    continue
+            continue
 
         best_travel_minutes = get_best_travel_minutes(
             transport_options
         )
-
         best_stay_minutes = get_best_stay_minutes(
             transport_options
         )
@@ -619,8 +605,6 @@ def recommend_spontaneous_destinations(
             best_travel_minutes,
             best_stay_minutes,
         )
-
-        
 
         results.append(
             {
@@ -645,7 +629,8 @@ def recommend_spontaneous_destinations(
         key=lambda item: item["score"],
         reverse=True,
     )
-
+    if not results:
+        raise HTTPException(status_code=404, detail="DESTINATIONS_NOT_FOUND")
 
     return SpontaneousDestinationResponse(destinations=results)
 
@@ -696,6 +681,9 @@ def create_spontaneous_course(
         raise HTTPException(status_code=502, detail="PLACE_SEARCH_FAILED") from exc
 
     course_candidates = filter_course_candidates(raw_places)
+    if not course_candidates:
+        raise HTTPException(status_code=404, detail="COURSE_CANDIDATES_NOT_FOUND")
+
     converted_places = [convert_to_course_place(place) for place in course_candidates]
     grouped_places = group_places_by_role(converted_places)
     generated_course = generate_course(
@@ -706,6 +694,8 @@ def create_spontaneous_course(
             "longitude": request.currentLocation.longitude,
         },
     )
+    if not generated_course:
+        raise HTTPException(status_code=404, detail="COURSE_GENERATION_EMPTY")
 
     log.info(
         "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, elapsedMs=%d",

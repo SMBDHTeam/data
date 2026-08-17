@@ -5,11 +5,7 @@ from math import asin, cos, radians, sin, sqrt
 from spontaneous.destinations import DESTINATION_ZONES, DestinationZone
 from spontaneous.models import Coordinate
 from spontaneous.models import TransportOption, TransportMode
-from transit.routing import find_route
-
 from decimal import Decimal
-
-from transit.routing import TransitPoint
 
 EARTH_RADIUS_METERS = 6_371_000
 
@@ -115,52 +111,6 @@ def calculate_destination_score(
     )
 
     return final_score, theme_score, distance
-
-
-
-def coordinate_to_transit_point(
-    coordinate: Coordinate,
-    name: str,
-) -> TransitPoint:
-    return TransitPoint(
-        name=name,
-        longitude=Decimal(str(coordinate.longitude)),
-        latitude=Decimal(str(coordinate.latitude)),
-    )
-
-
-
-def build_public_transit_option(
-    origin: TransitPoint,
-    destination: TransitPoint,
-) -> TransportOption:
-    transit, _ = find_route(
-        origin,
-        destination,
-        "SPONTANEOUS_OUTBOUND",
-        1,
-    )
-
-    return TransportOption(
-        mode=TransportMode.PUBLIC_TRANSIT,
-        available=transit.provider == "ODSAY",
-        outboundMinutes=transit.total_minutes if transit.provider == "ODSAY" else None,
-        returnMinutes=None,
-        expectedReturnAt=None,
-        unavailableReason=None if transit.provider == "ODSAY" else "NO_ROUTE",
-    )
-
-
-def zone_to_transit_point(
-    zone: DestinationZone,
-) -> TransitPoint:
-    return TransitPoint(
-        name=zone.name,
-        longitude=Decimal(str(zone.center_longitude)),
-        latitude=Decimal(str(zone.center_latitude)),
-    )
-
-
 def calculate_travel_time_score(minutes: int) -> float:
     return 1 / (1 + minutes / 30)
 

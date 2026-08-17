@@ -49,6 +49,8 @@ from schedule.service import (
 # ------
 from spontaneous.models import (
     Coordinate,
+    SpontaneousCourseRequest,
+    SpontaneousCourseResponse,
     SpontaneousDestinationRequest,
     SpontaneousDestinationResponse,
 )
@@ -65,8 +67,6 @@ from spontaneous.routing import (
     get_best_travel_minutes,
     get_best_stay_minutes,
 )
-
-from spontaneous.models import SpontaneousCourseRequest
 from spontaneous.destinations import find_destination_zone
 from spontaneous.places import (
     convert_to_course_place,
@@ -548,11 +548,10 @@ def update_schedule_endpoint(schedule_id: UUID, payload: ScheduleUpdateRequest) 
 def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> ScheduleMapResponse:
     return get_schedule_map(schedule_id, dayNo)
 
-# -------
-@app.post("/api/v1/spontaneous-trips/destinations")
+@app.post("/api/v1/spontaneous-trips/destinations", response_model=SpontaneousDestinationResponse)
 def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
-):
+) -> SpontaneousDestinationResponse:
     candidates = []
 
    
@@ -648,15 +647,13 @@ def recommend_spontaneous_destinations(
     )
 
 
-    return {
-        "destinations": results
-    }
+    return SpontaneousDestinationResponse(destinations=results)
 
 
-@app.post("/api/v1/spontaneous-trips/course")
+@app.post("/api/v1/spontaneous-trips/course", response_model=SpontaneousCourseResponse)
 def create_spontaneous_course(
     request: SpontaneousCourseRequest,
-):
+) -> SpontaneousCourseResponse:
     started_at = monotonic()
     zone = find_destination_zone(
         request.destinationId
@@ -718,10 +715,10 @@ def create_spontaneous_course(
         int((monotonic() - started_at) * 1000),
     )
 
-    return {
-        "destinationId": zone.destination_id,
-        "name": zone.name,
-        "transportMode": request.transportMode,
-        "transport": selected_transport.model_dump(mode="json"),
-        "course": generated_course,
-    }
+    return SpontaneousCourseResponse(
+        destinationId=zone.destination_id,
+        name=zone.name,
+        transportMode=request.transportMode,
+        transport=selected_transport,
+        course=generated_course,
+    )

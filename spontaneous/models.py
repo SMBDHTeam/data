@@ -39,11 +39,31 @@ class DestinationRecommendation(BaseModel):
     themeScore: float
     distanceMeters: int
     score: float
+    bestTravelMinutes: int | None = None
+    bestStayMinutes: int | None = None
     transportOptions: list[TransportOption] = Field(default_factory=list)
 
 
 class SpontaneousDestinationResponse(BaseModel):
     destinations: list[DestinationRecommendation]
+
+
+class SpontaneousCourseStop(BaseModel):
+    order: int
+    role: str
+    name: str
+    stayMinutes: int
+    themes: list[str] = Field(default_factory=list)
+    score: float
+
+
+class SpontaneousCourseResponse(BaseModel):
+    destinationId: str
+    name: str
+    transportMode: TransportMode
+    transport: TransportOption
+    course: list[SpontaneousCourseStop] = Field(default_factory=list)
+
 
 class SpontaneousCourseRequest(BaseModel):
     destinationId: str

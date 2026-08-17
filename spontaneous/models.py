@@ -52,6 +52,12 @@ class SpontaneousCourseStop(BaseModel):
     order: int
     role: str
     name: str
+    contentId: str | None = None
+    latitude: float
+    longitude: float
+    inboundMinutes: int | None = None
+    arriveAt: datetime | None = None
+    departAt: datetime | None = None
     stayMinutes: int
     themes: list[str] = Field(default_factory=list)
     score: float

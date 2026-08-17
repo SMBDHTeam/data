@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -63,6 +64,7 @@ from spontaneous.routing import (
     get_transport_options,
     get_best_travel_minutes,
     get_best_stay_minutes,
+    get_travel_minutes_for_mode,
 )
 from spontaneous.destinations import find_destination_zone
 from spontaneous.places import (
@@ -696,12 +698,16 @@ def create_spontaneous_course(
     )
     if not generated_course:
         raise HTTPException(status_code=404, detail="COURSE_GENERATION_EMPTY")
+    timed_course = add_spontaneous_course_timeline(
+        request,
+        generated_course,
+    )
 
     log.info(
         "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, elapsedMs=%d",
         request.destinationId,
         request.transportMode,
-        len(generated_course),
+        len(timed_course),
         int((monotonic() - started_at) * 1000),
     )
 
@@ -710,5 +716,43 @@ def create_spontaneous_course(
         name=zone.name,
         transportMode=request.transportMode,
         transport=selected_transport,
-        course=generated_course,
+        course=timed_course,
     )
+
+
+def add_spontaneous_course_timeline(
+    request: SpontaneousCourseRequest,
+    course: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    timed: list[dict[str, Any]] = []
+    cursor = request.startAt
+    current_location = request.currentLocation
+
+    for stop in course:
+        stop_location = Coordinate(
+            latitude=float(stop["latitude"]),
+            longitude=float(stop["longitude"]),
+        )
+        inbound_minutes = get_travel_minutes_for_mode(
+            current_location,
+            stop_location,
+            request.transportMode,
+        )
+        if inbound_minutes is None:
+            inbound_minutes = 0
+        arrive_at = cursor + timedelta(minutes=inbound_minutes)
+        depart_at = arrive_at + timedelta(minutes=int(stop["stayMinutes"]))
+
+        timed.append(
+            {
+                **stop,
+                "inboundMinutes": inbound_minutes,
+                "arriveAt": arrive_at,
+                "departAt": depart_at,
+            }
+        )
+
+        cursor = depart_at
+        current_location = stop_location
+
+    return timed

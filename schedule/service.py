@@ -56,6 +56,8 @@ CANDIDATE_PLACES_PATH = BASE_DIR / "candidate_places.json"
 DEFAULT_STAY_MINUTES = 90
 MIN_STAY_MINUTES = 30
 MAX_STOPS_PER_DAY = 5
+EARLY_FINISH_BUFFER_MINUTES = 180
+MIN_DAY_UTILIZATION_RATIO = 0.7
 
 THEME_PLACEHOLDER_NAMES = {
     "THEME_FOOD": ["로컬 맛집", "시장 먹거리", "바다뷰 카페", "디저트 스팟", "해산물 식당"],
@@ -438,7 +440,7 @@ def create_schedule(
             )
         )
 
-    days, repair_warnings = repair_schedule_days(planned_days, days, target_counts)
+    days, repair_warnings = repair_schedule_days(planned_days, days, target_counts, request)
 
     schedule = ScheduleResponse(
         id=uuid4(),
@@ -1635,6 +1637,7 @@ def repair_schedule_days(
     planned_days: list[PlannedDay],
     days: list[ScheduleDay],
     target_counts: dict[int, int],
+    request: ScheduleCreateRequest,
 ) -> tuple[list[ScheduleDay], list[str]]:
     repaired = [day.model_copy(deep=True) for day in days]
     warnings: list[str] = []
@@ -1660,6 +1663,18 @@ def repair_schedule_days(
             if moved:
                 warnings.append("일정 시간을 맞추기 위해 일부 방문지가 다른 날짜로 이동되었습니다.")
                 changed = True
+        for index, day in enumerate(repaired):
+            expanded = try_expand_underfilled_day(
+                repaired,
+                index,
+                planned_days[index],
+                target_counts,
+                request,
+            )
+            if expanded is not None:
+                repaired[index] = expanded
+                warnings.append("하루 활동 시간이 너무 짧지 않도록 방문지를 추가로 배치했습니다.")
+                changed = True
     for index, day in enumerate(repaired):
         repaired[index] = recalculate_day(day, day.stops)
     return repaired, dedupe_warnings(warnings)
@@ -1683,6 +1698,38 @@ def day_overrun_minutes(day: ScheduleDay) -> int:
     if day.final_transit is not None:
         planned += day.final_transit.total_minutes
     return max(0, planned - available)
+
+
+def day_used_minutes(day: ScheduleDay) -> int:
+    planned = sum(
+        stop.stay_minutes
+        + stop.waiting_minutes_before
+        + (stop.inbound_transit.total_minutes if stop.inbound_transit else 0)
+        for stop in day.stops
+    )
+    if day.final_transit is not None:
+        planned += day.final_transit.total_minutes
+    return planned
+
+
+def day_available_minutes(day: ScheduleDay) -> int:
+    if not day.start_time or not day.end_time:
+        return 0
+    return int(
+        (
+            datetime.combine(day.date, day.end_time)
+            - datetime.combine(day.date, day.start_time)
+        ).total_seconds() // 60
+    )
+
+
+def day_underfilled(day: ScheduleDay) -> bool:
+    available = day_available_minutes(day)
+    if available <= 0:
+        return False
+    used = day_used_minutes(day)
+    unused = available - used
+    return unused >= EARLY_FINISH_BUFFER_MINUTES and used < int(available * MIN_DAY_UTILIZATION_RATIO)
 
 
 def move_last_optional_stop(
@@ -1713,16 +1760,83 @@ def move_last_optional_stop(
         repaired[target_index] = recalc_target
         return True
     return False
-    return CandidatePlace(
-        id=place_id,
-        external_id=f"FASTAPI_{place_id}",
-        content_type_id=category_code or "12",
-        name=f"Place {place_id}",
-        category_label=category_label,
-        address=None,
-        longitude=longitude,
-        latitude=latitude,
-    )
+
+
+def fixed_event_specs_from_day(day: ScheduleDay) -> list[FixedEventSpec]:
+    specs: list[FixedEventSpec] = []
+    for stop in day.stops:
+        if stop.fixed_starts_at is None or stop.fixed_ends_at is None or stop.place.id is None:
+            continue
+        specs.append(
+            FixedEventSpec(
+                place_id=stop.place.id,
+                name=stop.place.name,
+                starts_at=stop.fixed_starts_at,
+                ends_at=stop.fixed_ends_at,
+            )
+        )
+    return specs
+
+
+def try_expand_underfilled_day(
+    repaired: list[ScheduleDay],
+    index: int,
+    planned_day: PlannedDay,
+    target_counts: dict[int, int],
+    request: ScheduleCreateRequest,
+) -> ScheduleDay | None:
+    current_day = repaired[index]
+    if not day_underfilled(current_day):
+        return None
+    if len(current_day.stops) >= MAX_STOPS_PER_DAY:
+        return None
+
+    current_place_ids = [
+        stop.place.id for stop in current_day.stops
+        if stop.place is not None and stop.place.id is not None
+    ]
+    used_elsewhere = {
+        stop.place.id
+        for day_idx, day in enumerate(repaired)
+        if day_idx != index
+        for stop in day.stops
+        if stop.place is not None and stop.place.id is not None
+    }
+    fixed_events = fixed_event_specs_from_day(current_day)
+    attempt_target = max(target_counts.get(current_day.day_no, len(current_place_ids)), len(current_place_ids))
+    best_day = current_day
+    best_used = day_used_minutes(current_day)
+
+    while attempt_target < MAX_STOPS_PER_DAY:
+        attempt_target += 1
+        rebuilt_stops = build_stops(
+            planned_day,
+            current_place_ids,
+            attempt_target,
+            request,
+            fixed_events,
+            used_elsewhere,
+        )
+        if len(rebuilt_stops) <= len(best_day.stops):
+            continue
+        rebuilt_day = current_day.model_copy(deep=True)
+        rebuilt_day.stops = rebuilt_stops
+        rebuilt_day.summary = build_stop_summary(rebuilt_stops)
+        rebuilt_day.final_transit = build_final_transit(planned_day_from_schedule_day(rebuilt_day), rebuilt_stops)
+        rebuilt_day = recalculate_day(rebuilt_day, rebuilt_stops)
+        if day_overrun_minutes(rebuilt_day) > 0:
+            continue
+        rebuilt_used = day_used_minutes(rebuilt_day)
+        if rebuilt_used <= best_used:
+            continue
+        best_day = rebuilt_day
+        best_used = rebuilt_used
+        if not day_underfilled(rebuilt_day):
+            break
+
+    if best_day is current_day:
+        return None
+    return best_day
 
 
 def distance_meters(

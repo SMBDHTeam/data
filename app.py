@@ -624,9 +624,6 @@ def recommend_spontaneous_destinations(
             }
         )
 
-        if len(results) >= 5:
-            break
-
     results.sort(
         key=lambda item: item["score"],
         reverse=True,
@@ -634,7 +631,7 @@ def recommend_spontaneous_destinations(
     if not results:
         raise HTTPException(status_code=404, detail="DESTINATIONS_NOT_FOUND")
 
-    return SpontaneousDestinationResponse(destinations=results)
+    return SpontaneousDestinationResponse(destinations=results[:5])
 
 
 @app.post("/api/v1/spontaneous-trips/course", response_model=SpontaneousCourseResponse)
@@ -746,7 +743,10 @@ def add_spontaneous_course_timeline(
             request.transportMode,
         )
         if inbound_minutes is None:
-            inbound_minutes = 0
+            raise HTTPException(
+                status_code=400,
+                detail="COURSE_SEGMENT_ROUTE_UNAVAILABLE",
+            )
         arrive_at = cursor + timedelta(minutes=inbound_minutes)
         depart_at = arrive_at + timedelta(minutes=int(stop["stayMinutes"]))
 
@@ -783,7 +783,10 @@ def calculate_spontaneous_return_timeline(
         request.transportMode,
     )
     if return_minutes is None:
-        return None, None
+        raise HTTPException(
+            status_code=400,
+            detail="COURSE_RETURN_ROUTE_UNAVAILABLE",
+        )
 
     depart_at = last_stop.get("departAt")
     if depart_at is None:

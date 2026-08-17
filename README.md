@@ -96,6 +96,28 @@ FastAPI가 아래 엔드포인트를 제공함:
 Spring `ScheduleService`, `SchedulePreviewService` 는 현재 실제 생성 로직을 거의 수행하지 않고,
 FastAPI 호출을 위한 위임 레이어로 정리되고 있습니다.
 
+### 4. 즉흥 여행 추천 / 코스 API
+
+FastAPI가 아래 엔드포인트를 제공함:
+
+- `POST /api/v1/spontaneous-trips/destinations`
+- `POST /api/v1/spontaneous-trips/course`
+
+현재 상태:
+
+- 출발 위치/시간/희망 테마 기준 목적지 추천 가능
+- 선택한 목적지 기준 즉흥 코스 생성 가능
+- 교통수단별 이동 가능 여부를 반영해 추천/코스 생성
+- 코스 stop 에 `arriveAt`, `departAt`, `inboundMinutes` 포함
+- 마지막 복귀 시간(`finalReturnMinutes`, `expectedReturnAt`) 포함
+
+최근 보강된 점:
+
+- 목적지 추천은 전체 후보를 끝까지 평가한 뒤 최종 점수 기준 `top 5`만 반환
+- 즉흥 코스는 구간 이동시간을 못 찾으면 `0분`으로 땜질하지 않고 실패 처리
+- 복귀 경로를 못 찾는 경우도 명확한 에러 코드로 실패 처리
+- 코스 장소 선택은 매 stop 마다 직전 선택 장소 기준으로 다시 점수 계산
+
 ## 현재 FastAPI 일정 생성 로직 상태
 
 ### 장소 후보 소스
@@ -137,6 +159,20 @@ FastAPI 호출을 위한 위임 레이어로 정리되고 있습니다.
 현재 응답에는 `provider`, `fallbackUsed`, `segments` 가 포함되어 있어
 실제로 어떤 경로 공급자가 사용됐는지 확인할 수 있습니다.
 
+### 일정 시간 채우기 보정
+
+현재 일정 생성은 하루 종료 시각보다 너무 이르게 끝나는 경우를 줄이기 위해
+underfilled day 보정 로직을 사용합니다.
+
+현재 동작:
+
+- 하루 사용 시간이 너무 짧으면 stop 수를 늘려 재계산 시도
+- 과도하게 이른 종료 일정을 완화
+- 그래도 후보/교통/운영시간 제약이 크면 20시 전에 끝날 수 있음
+
+즉, `10:00 ~ 20:00` 는 “활동 가능 시간 창”이고,
+항상 20시까지 꽉 채워진다는 보장은 아닙니다.
+
 ## 지금 실제 운영에서 확인된 상태
 
 ### 완료된 것
@@ -162,6 +198,50 @@ FastAPI 호출을 위한 위임 레이어로 정리되고 있습니다.
 - 배포 후 `server-dev`, `data-ai` 가 새 env 기준으로 정상 재기동되는지 확인
 - 프론트가 현재 preview/create 응답과 에러 포맷을 안정적으로 처리하는지 확인
 - 프론트의 일정 생성 플로우와 새 preview/create 응답 간 예외 처리 정리
+- 즉흥 여행 API의 실패 코드에 대한 프론트 문구 매핑 정리
+
+## 즉흥 여행 API 실패 코드
+
+프론트/QA에서 바로 참고할 수 있도록,
+현재 즉흥 여행 API에서 의미 있게 내려가는 오류 코드를 정리합니다.
+
+### 목적지 추천 API
+
+`POST /api/v1/spontaneous-trips/destinations`
+
+- `DESTINATIONS_NOT_FOUND`
+  - 추천 가능한 목적지가 없음
+  - 테마/시간/교통 조건이 너무 빡빡한 경우 발생 가능
+
+### 즉흥 코스 API
+
+`POST /api/v1/spontaneous-trips/course`
+
+- `DESTINATION_NOT_FOUND`
+  - 전달한 `destinationId` 가 유효하지 않음
+- `TRANSPORT_MODE_UNAVAILABLE`
+  - 요청한 교통수단으로 출발지 ↔ 목적지 이동이 불가능함
+- `PLACE_SEARCH_FAILED`
+  - 외부 관광 API 조회 실패
+- `COURSE_CANDIDATES_NOT_FOUND`
+  - 목적지 주변에서 코스 후보 장소를 찾지 못함
+- `COURSE_GENERATION_EMPTY`
+  - 후보는 있었지만 코스 조합 결과가 비어 있음
+- `COURSE_SEGMENT_ROUTE_UNAVAILABLE`
+  - 생성된 코스 내부의 stop 간 이동 경로를 찾지 못함
+- `COURSE_RETURN_ROUTE_UNAVAILABLE`
+  - 마지막 stop 에서 출발지로 돌아가는 경로를 찾지 못함
+
+프론트 권장 문구 예시:
+
+- `TRANSPORT_MODE_UNAVAILABLE`
+  - 선택한 이동수단으로 이동 가능한 코스를 찾지 못했습니다.
+- `COURSE_CANDIDATES_NOT_FOUND`
+  - 주변에서 추천할 장소를 찾지 못했습니다.
+- `COURSE_SEGMENT_ROUTE_UNAVAILABLE`
+  - 추천 코스의 이동 경로를 계산하지 못했습니다. 다시 시도해 주세요.
+- `COURSE_RETURN_ROUTE_UNAVAILABLE`
+  - 복귀 경로를 계산하지 못했습니다. 다른 이동수단으로 다시 시도해 주세요.
 
 ## 반드시 알아야 하는 운영 조건
 
@@ -262,18 +342,24 @@ curl -s -X POST http://127.0.0.1:8010/api/v1/schedule-previews \
 
 - [app.py](/Users/miju/test_1/data/app.py)
   - FastAPI 진입점
-  - health / predict / schedule API 정의
-- [schedule_service.py](/Users/miju/test_1/data/schedule_service.py)
+  - health / predict / schedule / spontaneous API 정의
+- [schedule/service.py](/Users/miju/test_1/data/schedule/service.py)
   - 일정 생성 핵심 로직
   - 후보 장소 로딩
   - 일정 조합 / stop 구성 / 경로 연결
-- [schedule_preview_service.py](/Users/miju/test_1/data/schedule_preview_service.py)
+- [schedule/preview_service.py](/Users/miju/test_1/data/schedule/preview_service.py)
   - 일정 preview 생성 / 조회
-- [schedule_persistence.py](/Users/miju/test_1/data/schedule_persistence.py)
+- [schedule/persistence.py](/Users/miju/test_1/data/schedule/persistence.py)
   - preview / schedule 저장 관련 처리
-- [transit_routing.py](/Users/miju/test_1/data/transit_routing.py)
+- [transit/routing.py](/Users/miju/test_1/data/transit/routing.py)
   - ODSAY / TMAP / 도보 fallback 경로 생성
-- [runtime_env.py](/Users/miju/test_1/data/runtime_env.py)
+- [spontaneous/course.py](/Users/miju/test_1/data/spontaneous/course.py)
+  - 즉흥 코스 역할별 장소 선택 / 순서 조합
+- [spontaneous/routing.py](/Users/miju/test_1/data/spontaneous/routing.py)
+  - 즉흥 여행용 교통수단 가능 여부 / 이동시간 계산
+- [spontaneous/places.py](/Users/miju/test_1/data/spontaneous/places.py)
+  - 즉흥 여행 목적지 주변 장소 조회 / 후보 필터링
+- [core/runtime_env.py](/Users/miju/test_1/data/core/runtime_env.py)
   - env 파일 로딩
 
 ## 한 줄 상태 요약

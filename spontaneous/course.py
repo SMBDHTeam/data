@@ -357,6 +357,9 @@ def generate_course(
                 "name":
                     selected.get("name")
                     or selected.get("title"),
+                "contentId": selected.get("contentId"),
+                "latitude": selected.get("latitude"),
+                "longitude": selected.get("longitude"),
 
                 "stayMinutes": stay_minutes,
 

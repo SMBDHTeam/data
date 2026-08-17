@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Any
 from uuid import UUID
-
-# ---
-from fastapi import FastAPI, HTTPException
-# ---
 
 import joblib
 import numpy as np
@@ -48,11 +45,10 @@ from schedule.service import (
     list_schedules,
     update_schedule,
 )
-
-
-# ------
 from spontaneous.models import (
     Coordinate,
+    SpontaneousCourseRequest,
+    SpontaneousCourseResponse,
     SpontaneousDestinationRequest,
     SpontaneousDestinationResponse,
 )
@@ -68,11 +64,15 @@ from spontaneous.routing import (
     get_transport_options,
     get_best_travel_minutes,
     get_best_stay_minutes,
+    get_travel_minutes_for_mode,
 )
-
-from spontaneous.models import SpontaneousCourseRequest
 from spontaneous.destinations import find_destination_zone
-# -------
+from spontaneous.places import (
+    convert_to_course_place,
+    filter_course_candidates,
+    search_places_by_zone,
+)
+from spontaneous.course import generate_course, group_places_by_role
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"
@@ -547,14 +547,12 @@ def update_schedule_endpoint(schedule_id: UUID, payload: ScheduleUpdateRequest) 
 def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> ScheduleMapResponse:
     return get_schedule_map(schedule_id, dayNo)
 
-# -------
-@app.post("/api/v1/spontaneous-trips/destinations")
+
+@app.post("/api/v1/spontaneous-trips/destinations", response_model=SpontaneousDestinationResponse)
 def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
-):
+) -> SpontaneousDestinationResponse:
     candidates = []
-
-   
     for zone in DESTINATION_ZONES:
         final_score, theme_score, distance = calculate_destination_score(
             zone,
@@ -571,26 +569,18 @@ def recommend_spontaneous_destinations(
             }
         )
 
-    
     candidates.sort(
         key=lambda item: item["score"],
         reverse=True,
     )
 
-   
-    # top_candidates = candidates[:5]
-
     results = []
-
     for candidate in candidates:
         zone = candidate["zone"]
-
         destination = Coordinate(
             latitude=zone.center_latitude,
             longitude=zone.center_longitude,
         )
-
-        
         transport_options = get_transport_options(
             request.currentLocation,
             destination,
@@ -602,14 +592,12 @@ def recommend_spontaneous_destinations(
             option.available
             for option in transport_options
         )
-
         if not has_available_transport:
-                    continue
+            continue
 
         best_travel_minutes = get_best_travel_minutes(
             transport_options
         )
-
         best_stay_minutes = get_best_stay_minutes(
             transport_options
         )
@@ -619,8 +607,6 @@ def recommend_spontaneous_destinations(
             best_travel_minutes,
             best_stay_minutes,
         )
-
-        
 
         results.append(
             {
@@ -645,17 +631,17 @@ def recommend_spontaneous_destinations(
         key=lambda item: item["score"],
         reverse=True,
     )
+    if not results:
+        raise HTTPException(status_code=404, detail="DESTINATIONS_NOT_FOUND")
+
+    return SpontaneousDestinationResponse(destinations=results)
 
 
-    return {
-        "destinations": results
-    }
-
-
-@app.post("/api/v1/spontaneous-trips/course")
+@app.post("/api/v1/spontaneous-trips/course", response_model=SpontaneousCourseResponse)
 def create_spontaneous_course(
     request: SpontaneousCourseRequest,
-):
+) -> SpontaneousCourseResponse:
+    started_at = monotonic()
     zone = find_destination_zone(
         request.destinationId
     )
@@ -666,10 +652,142 @@ def create_spontaneous_course(
             detail="DESTINATION_NOT_FOUND",
         )
 
-    return {
-        "destinationId": zone.destination_id,
-        "name": zone.name,
-        "transportMode": request.transportMode,
-        "message": "course generation ready",
-    }
-# -------
+    destination = Coordinate(
+        latitude=zone.center_latitude,
+        longitude=zone.center_longitude,
+    )
+
+    transport_options = get_transport_options(
+        request.currentLocation,
+        destination,
+        request.startAt,
+        request.returnBy,
+    )
+    selected_transport = next(
+        (option for option in transport_options if option.mode == request.transportMode),
+        None,
+    )
+
+    if selected_transport is None or not selected_transport.available:
+        raise HTTPException(
+            status_code=400,
+            detail="TRANSPORT_MODE_UNAVAILABLE",
+        )
+
+    try:
+        raw_places = search_places_by_zone(zone)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("spontaneous course place search failed. destinationId=%s", request.destinationId)
+        raise HTTPException(status_code=502, detail="PLACE_SEARCH_FAILED") from exc
+
+    course_candidates = filter_course_candidates(raw_places)
+    if not course_candidates:
+        raise HTTPException(status_code=404, detail="COURSE_CANDIDATES_NOT_FOUND")
+
+    converted_places = [convert_to_course_place(place) for place in course_candidates]
+    grouped_places = group_places_by_role(converted_places)
+    generated_course = generate_course(
+        grouped_places,
+        {theme.upper() for theme in request.desiredThemes},
+        {
+            "latitude": request.currentLocation.latitude,
+            "longitude": request.currentLocation.longitude,
+        },
+    )
+    if not generated_course:
+        raise HTTPException(status_code=404, detail="COURSE_GENERATION_EMPTY")
+    timed_course = add_spontaneous_course_timeline(
+        request,
+        generated_course,
+    )
+    final_return_minutes, expected_return_at = calculate_spontaneous_return_timeline(
+        request,
+        timed_course,
+    )
+
+    log.info(
+        "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, returnMinutes=%s, elapsedMs=%d",
+        request.destinationId,
+        request.transportMode,
+        len(timed_course),
+        final_return_minutes,
+        int((monotonic() - started_at) * 1000),
+    )
+
+    return SpontaneousCourseResponse(
+        destinationId=zone.destination_id,
+        name=zone.name,
+        transportMode=request.transportMode,
+        transport=selected_transport,
+        finalReturnMinutes=final_return_minutes,
+        expectedReturnAt=expected_return_at,
+        course=timed_course,
+    )
+
+
+def add_spontaneous_course_timeline(
+    request: SpontaneousCourseRequest,
+    course: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    timed: list[dict[str, Any]] = []
+    cursor = request.startAt
+    current_location = request.currentLocation
+
+    for stop in course:
+        stop_location = Coordinate(
+            latitude=float(stop["latitude"]),
+            longitude=float(stop["longitude"]),
+        )
+        inbound_minutes = get_travel_minutes_for_mode(
+            current_location,
+            stop_location,
+            request.transportMode,
+        )
+        if inbound_minutes is None:
+            inbound_minutes = 0
+        arrive_at = cursor + timedelta(minutes=inbound_minutes)
+        depart_at = arrive_at + timedelta(minutes=int(stop["stayMinutes"]))
+
+        timed.append(
+            {
+                **stop,
+                "inboundMinutes": inbound_minutes,
+                "arriveAt": arrive_at,
+                "departAt": depart_at,
+            }
+        )
+
+        cursor = depart_at
+        current_location = stop_location
+
+    return timed
+
+
+def calculate_spontaneous_return_timeline(
+    request: SpontaneousCourseRequest,
+    course: list[dict[str, Any]],
+) -> tuple[int | None, Any]:
+    if not course:
+        return None, None
+
+    last_stop = course[-1]
+    last_location = Coordinate(
+        latitude=float(last_stop["latitude"]),
+        longitude=float(last_stop["longitude"]),
+    )
+    return_minutes = get_travel_minutes_for_mode(
+        last_location,
+        request.currentLocation,
+        request.transportMode,
+    )
+    if return_minutes is None:
+        return None, None
+
+    depart_at = last_stop.get("departAt")
+    if depart_at is None:
+        return return_minutes, None
+
+    expected_return_at = depart_at + timedelta(minutes=return_minutes)
+    return return_minutes, expected_return_at

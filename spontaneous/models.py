@@ -68,6 +68,8 @@ class SpontaneousCourseResponse(BaseModel):
     name: str
     transportMode: TransportMode
     transport: TransportOption
+    finalReturnMinutes: int | None = None
+    expectedReturnAt: datetime | None = None
     course: list[SpontaneousCourseStop] = Field(default_factory=list)
 
 

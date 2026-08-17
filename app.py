@@ -702,12 +702,17 @@ def create_spontaneous_course(
         request,
         generated_course,
     )
+    final_return_minutes, expected_return_at = calculate_spontaneous_return_timeline(
+        request,
+        timed_course,
+    )
 
     log.info(
-        "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, elapsedMs=%d",
+        "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, returnMinutes=%s, elapsedMs=%d",
         request.destinationId,
         request.transportMode,
         len(timed_course),
+        final_return_minutes,
         int((monotonic() - started_at) * 1000),
     )
 
@@ -716,6 +721,8 @@ def create_spontaneous_course(
         name=zone.name,
         transportMode=request.transportMode,
         transport=selected_transport,
+        finalReturnMinutes=final_return_minutes,
+        expectedReturnAt=expected_return_at,
         course=timed_course,
     )
 
@@ -756,3 +763,31 @@ def add_spontaneous_course_timeline(
         current_location = stop_location
 
     return timed
+
+
+def calculate_spontaneous_return_timeline(
+    request: SpontaneousCourseRequest,
+    course: list[dict[str, Any]],
+) -> tuple[int | None, Any]:
+    if not course:
+        return None, None
+
+    last_stop = course[-1]
+    last_location = Coordinate(
+        latitude=float(last_stop["latitude"]),
+        longitude=float(last_stop["longitude"]),
+    )
+    return_minutes = get_travel_minutes_for_mode(
+        last_location,
+        request.currentLocation,
+        request.transportMode,
+    )
+    if return_minutes is None:
+        return None, None
+
+    depart_at = last_stop.get("departAt")
+    if depart_at is None:
+        return return_minutes, None
+
+    expected_return_at = depart_at + timedelta(minutes=return_minutes)
+    return return_minutes, expected_return_at

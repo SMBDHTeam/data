@@ -203,6 +203,9 @@ CANDIDATE_SELECT = """
         WHERE name IS NOT NULL
           AND longitude IS NOT NULL
           AND latitude IS NOT NULL
+          -- 관리자가 가린 장소는 일정 후보에서 뺀다. Spring 쪽 검색에서도 빠지므로
+          -- 사용자가 새로 고를 수 없지만, 이미 만들어 둔 Preview 가 참조할 수는 있다.
+          AND hidden_at IS NULL
 """
 
 

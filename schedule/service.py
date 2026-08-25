@@ -481,10 +481,15 @@ def create_schedule(
     return saved
 
 
-def list_schedules() -> ScheduleListResponse:
+def list_schedules(user_id: int | None = None) -> ScheduleListResponse:
+    """일정 목록. user_id 가 있으면 그 사용자의 일정만 준다.
+
+    메모리 저장소로 물러날 때는 거르지 않는다. DB 가 없는 상황은 로컬 실행뿐이고,
+    거기에는 소유자 개념이 없다.
+    """
     if db_enabled():
         try:
-            return list_schedules_from_db()
+            return list_schedules_from_db(user_id)
         except Exception:
             log.exception("schedule list db load failed. falling back to memory store")
     return STORE.list()

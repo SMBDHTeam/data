@@ -537,8 +537,13 @@ def create_schedule_endpoint(
 
 
 @app.get("/api/v1/schedules", response_model=ScheduleListResponse)
-def list_schedules_endpoint() -> ScheduleListResponse:
-    return list_schedules()
+def list_schedules_endpoint(userId: int | None = None) -> ScheduleListResponse:
+    """일정 목록.
+
+    userId 는 Spring 이 검증한 액세스 토큰에서 꺼낸 소유자다. 생략하면 전체를 준다.
+    Spring 은 로그인하지 않은 요청에는 아예 호출하지 않고 빈 목록을 돌려준다.
+    """
+    return list_schedules(userId)
 
 
 @app.get("/api/v1/schedules/{schedule_id}", response_model=ScheduleResponse)

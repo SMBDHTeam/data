@@ -498,10 +498,29 @@ def load_schedule(schedule_id: UUID) -> ScheduleResponse:
     return items[0]
 
 
-def list_schedules() -> ScheduleListResponse:
+def list_schedules(user_id: int | None = None) -> ScheduleListResponse:
+    """일정 목록.
+
+    user_id 가 있으면 그 사용자의 일정만 준다. 없으면 전체를 준다.
+
+    Spring 이 로그인한 사용자를 넘긴다. 여기서 거르지 않고 전체를 돌려주면 남의 일정이
+    그대로 노출되고, Spring 이 받아서 거르면 페이징이 맞지 않는다.
+
+    인증 도입 전에 만들어진 일정은 user_id 가 NULL 이라 어느 사용자 목록에도 나오지
+    않는다. 소유자를 되짚을 근거가 없으므로 의도한 결과다.
+    """
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM schedules ORDER BY start_date ASC, created_at DESC")
+            if user_id is None:
+                cur.execute(
+                    "SELECT id FROM schedules ORDER BY start_date ASC, created_at DESC"
+                )
+            else:
+                cur.execute(
+                    "SELECT id FROM schedules WHERE user_id = %s "
+                    "ORDER BY start_date ASC, created_at DESC",
+                    (user_id,),
+                )
             ids = [row["id"] for row in cur.fetchall()]
     return load_schedules(ids)
 

@@ -396,6 +396,7 @@ def create_schedule(
     request: ScheduleCreateRequest,
     preview_id: UUID | None = None,
     fixed_events_by_day: dict[int, list[FixedEventSpec]] | None = None,
+    owner_id: int | None = None,
 ) -> ScheduleResponse:
     log.info(
         "schedule build started. previewId=%s, startDate=%s, endDate=%s, candidateSource=%s",
@@ -465,7 +466,7 @@ def create_schedule(
     saved = STORE.save(schedule)
     if db_enabled():
         try:
-            save_schedule_to_db(saved, condition_request=request)
+            save_schedule_to_db(saved, condition_request=request, owner_id=owner_id)
         except Exception:
             log.exception("schedule persistence failed. scheduleId=%s", saved.id)
     log.info(

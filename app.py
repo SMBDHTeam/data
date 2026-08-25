@@ -487,7 +487,14 @@ def get_schedule_preview_endpoint(preview_id: UUID) -> SchedulePreviewResponse:
 def create_schedule_endpoint(
     payload: ScheduleCreateRequest | SchedulePreviewScheduleRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    auth_user_id: int | None = Header(default=None, alias="X-Auth-User-Id"),
 ) -> ScheduleResponse:
+    """일정을 만든다.
+
+    X-Auth-User-Id 는 Spring 이 검증한 액세스 토큰에서 꺼낸 소유자다. 외부에서 직접
+    들어오는 값이 아니라 같은 도커 네트워크 안의 Spring 만 보낸다. 헤더가 없으면
+    소유자 없는 일정으로 저장한다. 인가를 아직 켜지 않아 비로그인 생성이 가능하다.
+    """
     started_at = monotonic()
     if idempotency_key:
         if not isinstance(payload, SchedulePreviewScheduleRequest):
@@ -502,6 +509,7 @@ def create_schedule_endpoint(
             create_request,
             preview_id=preview.preview_id,
             fixed_events_by_day=fixed_events_by_day,
+            owner_id=auth_user_id,
         )
         attach_schedule_to_preview(preview.preview_id, schedule.id)
         log.info(
@@ -519,7 +527,7 @@ def create_schedule_endpoint(
         payload.start_date,
         payload.end_date,
     )
-    schedule = create_schedule(payload)
+    schedule = create_schedule(payload, owner_id=auth_user_id)
     log.info(
         "direct schedule created. scheduleId=%s, elapsedMs=%d",
         schedule.id,

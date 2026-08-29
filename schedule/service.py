@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -58,6 +59,7 @@ MIN_STAY_MINUTES = 30
 MAX_STOPS_PER_DAY = 5
 EARLY_FINISH_BUFFER_MINUTES = 180
 MIN_DAY_UTILIZATION_RATIO = 0.7
+CANDIDATE_POOL_TTL_SECONDS = max(5, int(os.getenv("SCHEDULE_CANDIDATE_POOL_TTL_SECONDS", "60")))
 
 THEME_PLACEHOLDER_NAMES = {
     "THEME_FOOD": ["로컬 맛집", "시장 먹거리", "바다뷰 카페", "디저트 스팟", "해산물 식당"],
@@ -355,14 +357,47 @@ def load_candidate_places() -> tuple[list[CandidatePlace], str]:
         return DEFAULT_CANDIDATES, "built_in_default"
 
 
-CANDIDATE_POOL, CANDIDATE_POOL_SOURCE = load_candidate_places()
+_candidate_pool_lock = Lock()
+CANDIDATE_POOL: list[CandidatePlace] = []
+CANDIDATE_POOL_SOURCE = "uninitialized"
+_candidate_pool_loaded_at = 0.0
 
-if CANDIDATE_POOL_SOURCE != "database":
-    log.warning(
-        "schedule candidate pool is not backed by the database. source=%s count=%s. "
-        "일정 품질이 크게 떨어진다. SPRING_DATASOURCE_* 환경변수를 확인할 것.",
-        CANDIDATE_POOL_SOURCE, len(CANDIDATE_POOL),
-    )
+
+def _refresh_candidate_pool(force: bool = False) -> tuple[list[CandidatePlace], str]:
+    global CANDIDATE_POOL, CANDIDATE_POOL_SOURCE, _candidate_pool_loaded_at
+    now = monotonic()
+    with _candidate_pool_lock:
+        if (
+            not force
+            and CANDIDATE_POOL
+            and now - _candidate_pool_loaded_at < CANDIDATE_POOL_TTL_SECONDS
+        ):
+            return CANDIDATE_POOL, CANDIDATE_POOL_SOURCE
+
+        pool, source = load_candidate_places()
+        CANDIDATE_POOL = pool
+        CANDIDATE_POOL_SOURCE = source
+        _candidate_pool_loaded_at = now
+
+        if source != "database":
+            log.warning(
+                "schedule candidate pool is not backed by the database. source=%s count=%s. "
+                "일정 품질이 크게 떨어진다. SPRING_DATASOURCE_* 환경변수를 확인할 것.",
+                source,
+                len(pool),
+            )
+        return CANDIDATE_POOL, CANDIDATE_POOL_SOURCE
+
+
+def current_candidate_pool(force_refresh: bool = False) -> list[CandidatePlace]:
+    return _refresh_candidate_pool(force_refresh)[0]
+
+
+def current_candidate_pool_source(force_refresh: bool = False) -> str:
+    return _refresh_candidate_pool(force_refresh)[1]
+
+
+_refresh_candidate_pool(force=True)
 
 
 class ScheduleStore:
@@ -401,12 +436,13 @@ def create_schedule(
     fixed_events_by_day: dict[int, list[FixedEventSpec]] | None = None,
     owner_id: int | None = None,
 ) -> ScheduleResponse:
+    candidate_source = current_candidate_pool_source()
     log.info(
         "schedule build started. previewId=%s, startDate=%s, endDate=%s, candidateSource=%s",
         preview_id,
         request.start_date,
         request.end_date,
-        CANDIDATE_POOL_SOURCE,
+        candidate_source,
     )
     planned_days = plan_days(request)
     places_by_day = distribute_must_visit_places(planned_days, request.must_visit_place_ids)
@@ -484,14 +520,18 @@ def create_schedule(
 def list_schedules(user_id: int | None = None) -> ScheduleListResponse:
     """일정 목록. user_id 가 있으면 그 사용자의 일정만 준다.
 
-    메모리 저장소로 물러날 때는 거르지 않는다. DB 가 없는 상황은 로컬 실행뿐이고,
-    거기에는 소유자 개념이 없다.
+    DB 가 켜진 운영 경로에서는 조회 실패를 메모리 저장소로 숨기지 않는다.
+    목록 API 는 소유자 필터가 중요하므로, 조용히 fallback 하면 다른 사용자 데이터가
+    섞여 보일 위험이 있다.
+
+    DB 가 아예 없는 로컬 실행에서만 메모리 저장소를 쓴다.
     """
     if db_enabled():
         try:
             return list_schedules_from_db(user_id)
         except Exception:
-            log.exception("schedule list db load failed. falling back to memory store")
+            log.exception("schedule list db load failed. userId=%s", user_id)
+            raise HTTPException(status_code=503, detail="Schedule list unavailable")
     return STORE.list()
 
 
@@ -1432,7 +1472,7 @@ def resolve_place_or_400(place_id: int) -> CandidatePlace:
     존재하지 않는 장소로 일정을 만들면 저장 단계에서 반드시 실패하므로,
     가짜 장소를 지어내지 않고 400 으로 거절한다.
     """
-    for candidate in CANDIDATE_POOL:
+    for candidate in current_candidate_pool():
         if candidate.id == place_id:
             return candidate
     resolved = (load_candidate_places_by_ids([place_id]) or {}).get(place_id)
@@ -1463,7 +1503,8 @@ def choose_candidate_places(
     selected_semantic_groups: list[str] = []
     # 후보 풀은 모듈 로드 시 한 번만 채워지므로 그 뒤 등록된 장소는 들어 있지 않다.
     # 풀에 없는 id 만 DB 에서 한 번에 읽어온다.
-    pool_by_id = {item.id: item for item in CANDIDATE_POOL}
+    candidate_pool = current_candidate_pool()
+    pool_by_id = {item.id: item for item in candidate_pool}
     missing_ids = [pid for pid in must_visit_ids if pid not in pool_by_id]
     resolved_from_db = load_candidate_places_by_ids(missing_ids) or {}
 
@@ -1490,7 +1531,7 @@ def choose_candidate_places(
     ranked = sorted(
         (
             candidate
-            for candidate in CANDIDATE_POOL
+            for candidate in candidate_pool
             if candidate.id not in seen_ids and not is_day_endpoint(candidate, planned_day)
         ),
         key=lambda candidate: candidate_rank(candidate, planned_day, request, theme_answer_id),

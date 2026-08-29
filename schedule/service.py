@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 
 from core.runtime_env import load_runtime_env
-from place.place_experience import classify_place
+from place.place_experience import ExperienceProfile, classify_place
 from schedule.models import (
     DayLocation,
     MapMarker,
@@ -149,6 +149,16 @@ class FixedEventSpec:
 
 RouteCacheKey = tuple[str, str, str, str, str]
 ROUTE_CACHE: ContextVar[dict[RouteCacheKey, ScheduleTransit] | None] = ContextVar("schedule_route_cache", default=None)
+PlaceProfileCacheKey = tuple[int, str, str]
+PLACE_PROFILE_CACHE: ContextVar[dict[PlaceProfileCacheKey, ExperienceProfile] | None] = ContextVar(
+    "schedule_place_profile_cache",
+    default=None,
+)
+CandidateRankCacheKey = tuple[int, int, str, str, str, str, str, str, bool, bool, bool, bool]
+CANDIDATE_RANK_CACHE: ContextVar[dict[CandidateRankCacheKey, tuple[int, int, int, int, int, float]] | None] = ContextVar(
+    "schedule_candidate_rank_cache",
+    default=None,
+)
 
 
 DEFAULT_CANDIDATES = [
@@ -1233,11 +1243,36 @@ def dedupe_warnings(warnings: list[str]) -> list[str]:
 @contextmanager
 def schedule_route_cache_scope():
     cache: dict[RouteCacheKey, ScheduleTransit] = {}
-    token = ROUTE_CACHE.set(cache)
+    profile_cache: dict[PlaceProfileCacheKey, ExperienceProfile] = {}
+    rank_cache: dict[CandidateRankCacheKey, tuple[int, int, int, int, int, float]] = {}
+    route_token = ROUTE_CACHE.set(cache)
+    profile_token = PLACE_PROFILE_CACHE.set(profile_cache)
+    rank_token = CANDIDATE_RANK_CACHE.set(rank_cache)
     try:
         yield cache
     finally:
-        ROUTE_CACHE.reset(token)
+        CANDIDATE_RANK_CACHE.reset(rank_token)
+        PLACE_PROFILE_CACHE.reset(profile_token)
+        ROUTE_CACHE.reset(route_token)
+
+
+def place_profile_cache_key(candidate: CandidatePlace) -> PlaceProfileCacheKey:
+    return (
+        candidate.id,
+        candidate.category_label,
+        candidate.content_type_id,
+    )
+
+
+def cached_place_profile(candidate: CandidatePlace) -> ExperienceProfile:
+    cache = PLACE_PROFILE_CACHE.get()
+    key = place_profile_cache_key(candidate)
+    if cache is not None and key in cache:
+        return cache[key]
+    profile = classify_place(candidate.name, candidate.category_label, candidate.content_type_id)
+    if cache is not None:
+        cache[key] = profile
+    return profile
 
 
 def rounded_coord(value: Decimal | None) -> str:
@@ -1258,6 +1293,54 @@ def route_cache_key(
         rounded_coord(destination.longitude),
         rounded_coord(destination.latitude),
     )
+
+
+def request_rank_flags(request: ScheduleCreateRequest) -> tuple[bool, bool, bool, bool]:
+    return (
+        has_answer(request, "PACE_PACKED"),
+        has_answer(request, "PACE_RELAXED"),
+        low_mobility_profile(request),
+        has_answer(request, "TRANSIT_SIMPLE"),
+    )
+
+
+def candidate_rank_cache_key(
+    candidate: CandidatePlace,
+    planned_day: PlannedDay,
+    request: ScheduleCreateRequest,
+    theme_answer_id: str | None,
+) -> CandidateRankCacheKey:
+    pace_packed, pace_relaxed, low_mobility, transit_simple = request_rank_flags(request)
+    return (
+        candidate.id,
+        planned_day.day_no,
+        planned_day.date.isoformat(),
+        rounded_coord(planned_day.start_location.longitude),
+        rounded_coord(planned_day.start_location.latitude),
+        rounded_coord(planned_day.end_location.longitude),
+        rounded_coord(planned_day.end_location.latitude),
+        theme_answer_id or "",
+        pace_packed,
+        pace_relaxed,
+        low_mobility,
+        transit_simple,
+    )
+
+
+def cached_candidate_rank(
+    candidate: CandidatePlace,
+    planned_day: PlannedDay,
+    request: ScheduleCreateRequest,
+    theme_answer_id: str | None,
+) -> tuple[int, int, int, int, int, float]:
+    cache = CANDIDATE_RANK_CACHE.get()
+    key = candidate_rank_cache_key(candidate, planned_day, request, theme_answer_id)
+    if cache is not None and key in cache:
+        return cache[key]
+    rank = candidate_rank(candidate, planned_day, request, theme_answer_id)
+    if cache is not None:
+        cache[key] = rank
+    return rank
 
 
 def clone_transit_for_route(
@@ -1576,7 +1659,7 @@ def choose_candidate_places(
             )
         resolved.append(candidate)
         seen_ids.add(candidate.id)
-        profile = classify_place(candidate.name, candidate.category_label, candidate.content_type_id)
+        profile = cached_place_profile(candidate)
         selected_experience_types.append(profile.experience_type)
         selected_semantic_groups.append(profile.semantic_group)
 
@@ -1591,7 +1674,7 @@ def choose_candidate_places(
             for candidate in candidate_pool
             if candidate.id not in seen_ids and not is_day_endpoint(candidate, planned_day)
         ),
-        key=lambda candidate: candidate_rank(candidate, planned_day, request, theme_answer_id),
+        key=lambda candidate: cached_candidate_rank(candidate, planned_day, request, theme_answer_id),
     )
     # 앞선 일차에서 쓴 장소는 뒤로 미룬다. 완전히 배제하지 않는 이유는 후보 풀이
     # 작을 때 일차가 비는 것을 막기 위해서다.
@@ -1601,7 +1684,7 @@ def choose_candidate_places(
     for candidate in ranked:
         if len(resolved) >= target_count:
             break
-        profile = classify_place(candidate.name, candidate.category_label, candidate.content_type_id)
+        profile = cached_place_profile(candidate)
         if exceeds_strong_preference_diversity(
             profile.experience_type,
             profile.semantic_group,

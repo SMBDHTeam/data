@@ -1831,6 +1831,7 @@ def repair_schedule_days(
 ) -> tuple[list[ScheduleDay], list[str]]:
     repaired = [day.model_copy(deep=True) for day in days]
     warnings: list[str] = []
+    dirty_indexes: set[int] = set()
     changed = True
     while changed:
         changed = False
@@ -1841,16 +1842,18 @@ def repair_schedule_days(
             repaired_day = recalculate_day(day, day.stops)
             if day_overrun_minutes(repaired_day) <= 0:
                 repaired[index] = repaired_day
+                dirty_indexes.add(index)
                 warnings.append("일정 시간을 맞추기 위해 일부 방문지 체류 시간이 조정되었습니다.")
                 changed = True
                 continue
-            moved = move_last_optional_stop(
+            moved_indexes = move_last_optional_stop(
                 repaired,
                 index,
                 planned_days,
                 target_counts,
             )
-            if moved:
+            if moved_indexes is not None:
+                dirty_indexes.update(moved_indexes)
                 warnings.append("일정 시간을 맞추기 위해 일부 방문지가 다른 날짜로 이동되었습니다.")
                 changed = True
         for index, day in enumerate(repaired):
@@ -1863,10 +1866,11 @@ def repair_schedule_days(
             )
             if expanded is not None:
                 repaired[index] = expanded
+                dirty_indexes.add(index)
                 warnings.append("하루 활동 시간이 너무 짧지 않도록 방문지를 추가로 배치했습니다.")
                 changed = True
-    for index, day in enumerate(repaired):
-        repaired[index] = recalculate_day(day, day.stops)
+    for index in sorted(dirty_indexes):
+        repaired[index] = recalculate_day(repaired[index], repaired[index].stops)
     return repaired, dedupe_warnings(warnings)
 
 
@@ -1927,14 +1931,14 @@ def move_last_optional_stop(
     source_index: int,
     planned_days: list[PlannedDay],
     target_counts: dict[int, int],
-) -> bool:
+) -> tuple[int, int] | None:
     source_day = repaired[source_index]
     movable_stops = [
         stop for stop in reversed(source_day.stops)
         if stop.fixed_starts_at is None and "must_visit_seed" not in stop.selection_reasons
     ]
     if not movable_stops:
-        return False
+        return None
     stop_to_move = movable_stops[0]
     for target_index, target_day in enumerate(repaired):
         if target_index == source_index:
@@ -1948,8 +1952,8 @@ def move_last_optional_stop(
         remaining_source = [stop for stop in source_day.stops if stop.id != stop_to_move.id]
         repaired[source_index] = recalculate_day(source_day, remaining_source)
         repaired[target_index] = recalc_target
-        return True
-    return False
+        return source_index, target_index
+    return None
 
 
 def fixed_event_specs_from_day(day: ScheduleDay) -> list[FixedEventSpec]:
@@ -2012,7 +2016,6 @@ def try_expand_underfilled_day(
         rebuilt_day = current_day.model_copy(deep=True)
         rebuilt_day.stops = rebuilt_stops
         rebuilt_day.summary = build_stop_summary(rebuilt_stops)
-        rebuilt_day.final_transit = build_final_transit(planned_day_from_schedule_day(rebuilt_day), rebuilt_stops)
         rebuilt_day = recalculate_day(rebuilt_day, rebuilt_stops)
         if day_overrun_minutes(rebuilt_day) > 0:
             continue

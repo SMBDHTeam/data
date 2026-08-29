@@ -43,6 +43,16 @@ from schedule.models import (
 
 log = logging.getLogger("data.schedule.persistence")
 
+CONTENT_TYPE_FALLBACK_LABELS = {
+    "12": "관광지",
+    "14": "문화시설",
+    "15": "축제·공연",
+    "28": "레포츠",
+    "32": "숙박",
+    "38": "쇼핑",
+    "39": "음식점",
+}
+
 
 def resolve_db_dsn() -> tuple[str | None, str | None, str | None]:
     jdbc_url = os.getenv("SPRING_DATASOURCE_URL")
@@ -64,6 +74,16 @@ def resolve_db_dsn() -> tuple[str | None, str | None, str | None]:
 def db_enabled() -> bool:
     dsn, _, _ = resolve_db_dsn()
     return bool(dsn)
+
+
+def normalize_category_label(raw_label: str | None, content_type_id: str | None) -> str:
+    normalized = (raw_label or "").strip()
+    fallback = CONTENT_TYPE_FALLBACK_LABELS.get(str(content_type_id or ""), "관광지")
+    if not normalized:
+        return fallback
+    if normalized.startswith("A") and normalized[1:].isdigit():
+        return fallback
+    return normalized
 
 
 def connect():
@@ -592,7 +612,7 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
             id=row["place_id"],
             name=row["place_name"],
             category=row["content_type_id"],
-            categoryLabel=row["category"] or "미확인",
+            categoryLabel=normalize_category_label(row["category"], row["content_type_id"]),
             address=row["address"],
             longitude=row["longitude"],
             latitude=row["latitude"],

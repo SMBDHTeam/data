@@ -5,6 +5,8 @@ import logging
 import re
 import os
 from collections import defaultdict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -143,6 +145,10 @@ class FixedEventSpec:
     name: str
     starts_at: datetime
     ends_at: datetime
+
+
+RouteCacheKey = tuple[str, str, str, str, str]
+ROUTE_CACHE: ContextVar[dict[RouteCacheKey, ScheduleTransit] | None] = ContextVar("schedule_route_cache", default=None)
 
 
 DEFAULT_CANDIDATES = [
@@ -436,85 +442,86 @@ def create_schedule(
     fixed_events_by_day: dict[int, list[FixedEventSpec]] | None = None,
     owner_id: int | None = None,
 ) -> ScheduleResponse:
-    candidate_source = current_candidate_pool_source()
-    log.info(
-        "schedule build started. previewId=%s, startDate=%s, endDate=%s, candidateSource=%s",
-        preview_id,
-        request.start_date,
-        request.end_date,
-        candidate_source,
-    )
-    planned_days = plan_days(request)
-    places_by_day = distribute_must_visit_places(planned_days, request.must_visit_place_ids)
-    target_counts = target_stop_counts(planned_days, request)
-    days: list[ScheduleDay] = []
-    # 앞선 일차에서 쓴 장소를 누적해 다음 일차가 같은 곳을 다시 고르지 않게 한다.
-    used_place_ids: set[int] = set()
-    for planned_day in planned_days:
-        day_place_ids = places_by_day.get(planned_day.day_no, [])
-        target_count = max(len(day_place_ids), target_counts.get(planned_day.day_no, 1))
-        stops = build_stops(
-            planned_day,
-            day_place_ids,
-            target_count,
-            request,
-            fixed_events_by_day.get(planned_day.day_no, []) if fixed_events_by_day else [],
-            used_place_ids,
+    with schedule_route_cache_scope():
+        candidate_source = current_candidate_pool_source()
+        log.info(
+            "schedule build started. previewId=%s, startDate=%s, endDate=%s, candidateSource=%s",
+            preview_id,
+            request.start_date,
+            request.end_date,
+            candidate_source,
         )
-        used_place_ids.update(
-            stop.place.id for stop in stops if stop.place is not None and stop.place.id is not None
-        )
-        days.append(
-            ScheduleDay(
-                dayNo=planned_day.day_no,
-                date=planned_day.date,
-                startTime=planned_day.start_time,
-                endTime=planned_day.end_time,
-                startLocation=to_day_location(planned_day.start_location),
-                endLocation=to_day_location(planned_day.end_location),
-                startLocationSource="REQUEST",
-                endLocationSource="REQUEST",
-                summary=build_day_summary(planned_day, stops),
-                stops=stops,
-                finalTransit=build_final_transit(planned_day, stops),
+        planned_days = plan_days(request)
+        places_by_day = distribute_must_visit_places(planned_days, request.must_visit_place_ids)
+        target_counts = target_stop_counts(planned_days, request)
+        days: list[ScheduleDay] = []
+        # 앞선 일차에서 쓴 장소를 누적해 다음 일차가 같은 곳을 다시 고르지 않게 한다.
+        used_place_ids: set[int] = set()
+        for planned_day in planned_days:
+            day_place_ids = places_by_day.get(planned_day.day_no, [])
+            target_count = max(len(day_place_ids), target_counts.get(planned_day.day_no, 1))
+            stops = build_stops(
+                planned_day,
+                day_place_ids,
+                target_count,
+                request,
+                fixed_events_by_day.get(planned_day.day_no, []) if fixed_events_by_day else [],
+                used_place_ids,
             )
-        )
-
-    days, repair_warnings = repair_schedule_days(planned_days, days, target_counts, request)
-
-    schedule = ScheduleResponse(
-        id=uuid4(),
-        status="DRAFT",
-        startDate=request.start_date,
-        endDate=request.end_date,
-        dailyStartTime=request.daily_start_time,
-        dailyEndTime=request.daily_end_time,
-        styleSummary=build_style_summary(request),
-        days=days,
-        evaluation=None,
-        previewId=preview_id,
-        planningAssumptions=PlanningAssumptions(
-            routeCoverage=resolve_route_coverage(days),
-            warnings=dedupe_warnings(
-                DEFAULT_PLANNING_WARNINGS
-                + (["고정 일정 시간을 반영해 일부 방문 순서를 조정했습니다."] if fixed_events_by_day else [])
-                + repair_warnings
+            used_place_ids.update(
+                stop.place.id for stop in stops if stop.place is not None and stop.place.id is not None
             )
-        ),
-    )
-    saved = STORE.save(schedule)
-    if db_enabled():
-        try:
-            save_schedule_to_db(saved, condition_request=request, owner_id=owner_id)
-        except Exception:
-            log.exception("schedule persistence failed. scheduleId=%s", saved.id)
-    log.info(
-        "schedule build finished. scheduleId=%s, days=%s, routeCoverage=%s",
-        saved.id,
-        len(saved.days),
-        saved.planning_assumptions.route_coverage if saved.planning_assumptions else None,
-    )
-    return saved
+            days.append(
+                ScheduleDay(
+                    dayNo=planned_day.day_no,
+                    date=planned_day.date,
+                    startTime=planned_day.start_time,
+                    endTime=planned_day.end_time,
+                    startLocation=to_day_location(planned_day.start_location),
+                    endLocation=to_day_location(planned_day.end_location),
+                    startLocationSource="REQUEST",
+                    endLocationSource="REQUEST",
+                    summary=build_day_summary(planned_day, stops),
+                    stops=stops,
+                    finalTransit=build_final_transit(planned_day, stops),
+                )
+            )
+
+        days, repair_warnings = repair_schedule_days(planned_days, days, target_counts, request)
+
+        schedule = ScheduleResponse(
+            id=uuid4(),
+            status="DRAFT",
+            startDate=request.start_date,
+            endDate=request.end_date,
+            dailyStartTime=request.daily_start_time,
+            dailyEndTime=request.daily_end_time,
+            styleSummary=build_style_summary(request),
+            days=days,
+            evaluation=None,
+            previewId=preview_id,
+            planningAssumptions=PlanningAssumptions(
+                routeCoverage=resolve_route_coverage(days),
+                warnings=dedupe_warnings(
+                    DEFAULT_PLANNING_WARNINGS
+                    + (["고정 일정 시간을 반영해 일부 방문 순서를 조정했습니다."] if fixed_events_by_day else [])
+                    + repair_warnings
+                )
+            ),
+        )
+        saved = STORE.save(schedule)
+        if db_enabled():
+            try:
+                save_schedule_to_db(saved, condition_request=request, owner_id=owner_id)
+            except Exception:
+                log.exception("schedule persistence failed. scheduleId=%s", saved.id)
+        log.info(
+            "schedule build finished. scheduleId=%s, days=%s, routeCoverage=%s",
+            saved.id,
+            len(saved.days),
+            saved.planning_assumptions.route_coverage if saved.planning_assumptions else None,
+        )
+        return saved
 
 
 def list_schedules(user_id: int | None = None) -> ScheduleListResponse:
@@ -548,66 +555,67 @@ def get_schedule(schedule_id: UUID) -> ScheduleResponse:
 
 
 def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> ScheduleResponse:
-    existing = get_schedule(schedule_id)
-    days_by_no = {day.day_no: day.model_copy(deep=True) for day in existing.days}
-    existing_stop_index = {
-        stop.id: (day.day_no, stop)
-        for day in existing.days
-        for stop in day.stops
-    }
+    with schedule_route_cache_scope():
+        existing = get_schedule(schedule_id)
+        days_by_no = {day.day_no: day.model_copy(deep=True) for day in existing.days}
+        existing_stop_index = {
+            stop.id: (day.day_no, stop)
+            for day in existing.days
+            for stop in day.stops
+        }
 
-    grouped_stops: dict[int, list[ScheduleStop]] = defaultdict(list)
-    for patch_stop in request.stops:
-        if patch_stop.day_no not in days_by_no:
-            raise HTTPException(status_code=400, detail=f"dayNo {patch_stop.day_no} does not exist")
-        if patch_stop.stop_id is not None:
-            original = existing_stop_index.get(patch_stop.stop_id)
-            if original is None:
-                raise HTTPException(status_code=404, detail=f"stopId {patch_stop.stop_id} not found")
-            _, existing_stop = original
-            updated_stop = existing_stop.model_copy(deep=True)
-            updated_stop.order = patch_stop.order
-            updated_stop.stay_minutes = patch_stop.stay_minutes
-            updated_stop.arrive_at = None
-            updated_stop.depart_at = None
-            updated_stop.warnings = dedupe_warnings(
-                updated_stop.warnings + ["방문 순서 변경에 따라 도착 및 출발 시간이 다시 계산되었습니다."]
+        grouped_stops: dict[int, list[ScheduleStop]] = defaultdict(list)
+        for patch_stop in request.stops:
+            if patch_stop.day_no not in days_by_no:
+                raise HTTPException(status_code=400, detail=f"dayNo {patch_stop.day_no} does not exist")
+            if patch_stop.stop_id is not None:
+                original = existing_stop_index.get(patch_stop.stop_id)
+                if original is None:
+                    raise HTTPException(status_code=404, detail=f"stopId {patch_stop.stop_id} not found")
+                _, existing_stop = original
+                updated_stop = existing_stop.model_copy(deep=True)
+                updated_stop.order = patch_stop.order
+                updated_stop.stay_minutes = patch_stop.stay_minutes
+                updated_stop.arrive_at = None
+                updated_stop.depart_at = None
+                updated_stop.warnings = dedupe_warnings(
+                    updated_stop.warnings + ["방문 순서 변경에 따라 도착 및 출발 시간이 다시 계산되었습니다."]
+                )
+                grouped_stops[patch_stop.day_no].append(updated_stop)
+                continue
+
+            grouped_stops[patch_stop.day_no].append(
+                candidate_stop(
+                    order=patch_stop.order,
+                    stay_minutes=patch_stop.stay_minutes,
+                    candidate=resolve_place_or_400(patch_stop.place_id),
+                    selection_reasons=["update_requested_place"],
+                )
             )
-            grouped_stops[patch_stop.day_no].append(updated_stop)
-            continue
 
-        grouped_stops[patch_stop.day_no].append(
-            candidate_stop(
-                order=patch_stop.order,
-                stay_minutes=patch_stop.stay_minutes,
-                candidate=resolve_place_or_400(patch_stop.place_id),
-                selection_reasons=["update_requested_place"],
+        updated_days: list[ScheduleDay] = []
+        for day_no, day in sorted(days_by_no.items()):
+            day_stops = sorted(grouped_stops.get(day_no, day.stops), key=lambda stop: stop.order)
+            recalculated = recalculate_day(day, day_stops)
+            recalculated.final_transit = build_final_transit(planned_day_from_schedule_day(recalculated), recalculated.stops)
+            updated_days.append(recalculated)
+
+        updated_schedule = existing.model_copy(deep=True)
+        updated_schedule.days = updated_days
+        updated_schedule.planning_assumptions = PlanningAssumptions(
+            routeCoverage=resolve_route_coverage(updated_days),
+            warnings=dedupe_warnings(
+                DEFAULT_PLANNING_WARNINGS + ["일정 수정 내용을 반영해 이동 시간과 방문 순서를 다시 계산했습니다."]
             )
         )
-
-    updated_days: list[ScheduleDay] = []
-    for day_no, day in sorted(days_by_no.items()):
-        day_stops = sorted(grouped_stops.get(day_no, day.stops), key=lambda stop: stop.order)
-        recalculated = recalculate_day(day, day_stops)
-        recalculated.final_transit = build_final_transit(planned_day_from_schedule_day(recalculated), recalculated.stops)
-        updated_days.append(recalculated)
-
-    updated_schedule = existing.model_copy(deep=True)
-    updated_schedule.days = updated_days
-    updated_schedule.planning_assumptions = PlanningAssumptions(
-        routeCoverage=resolve_route_coverage(updated_days),
-        warnings=dedupe_warnings(
-            DEFAULT_PLANNING_WARNINGS + ["일정 수정 내용을 반영해 이동 시간과 방문 순서를 다시 계산했습니다."]
-        )
-    )
-    saved = STORE.save(updated_schedule)
-    if db_enabled():
-        try:
-            save_schedule_to_db(saved, condition_request=request_context_from_schedule(saved))
-        except Exception:
-            log.exception("schedule update persistence failed. scheduleId=%s", saved.id)
-    log.info("schedule updated. scheduleId=%s, days=%s", saved.id, len(saved.days))
-    return saved
+        saved = STORE.save(updated_schedule)
+        if db_enabled():
+            try:
+                save_schedule_to_db(saved, condition_request=request_context_from_schedule(saved))
+            except Exception:
+                log.exception("schedule update persistence failed. scheduleId=%s", saved.id)
+        log.info("schedule updated. scheduleId=%s, days=%s", saved.id, len(saved.days))
+        return saved
 
 
 def get_schedule_map(schedule_id: UUID, day_no: int | None) -> ScheduleMapResponse:
@@ -1222,14 +1230,61 @@ def dedupe_warnings(warnings: list[str]) -> list[str]:
     return list(dict.fromkeys(warnings))
 
 
+@contextmanager
+def schedule_route_cache_scope():
+    cache: dict[RouteCacheKey, ScheduleTransit] = {}
+    token = ROUTE_CACHE.set(cache)
+    try:
+        yield cache
+    finally:
+        ROUTE_CACHE.reset(token)
+
+
+def rounded_coord(value: Decimal | None) -> str:
+    if value is None:
+        return "0"
+    return f"{float(value):.4f}"
+
+
+def route_cache_key(
+    origin: TransitPoint,
+    destination: TransitPoint,
+    route_type: str,
+) -> RouteCacheKey:
+    return (
+        route_type,
+        rounded_coord(origin.longitude),
+        rounded_coord(origin.latitude),
+        rounded_coord(destination.longitude),
+        rounded_coord(destination.latitude),
+    )
+
+
+def clone_transit_for_route(
+    transit: ScheduleTransit,
+    route_type: str,
+    route_order: int,
+) -> ScheduleTransit:
+    cloned = transit.model_copy(deep=True)
+    cloned.route_type = route_type
+    cloned.route_order = route_order
+    return cloned
+
+
 def resolve_transit(
     origin: TransitPoint,
     destination: TransitPoint,
     route_type: str,
     route_order: int,
 ) -> ScheduleTransit:
+    cache = ROUTE_CACHE.get()
+    key = route_cache_key(origin, destination, route_type)
+    if cache is not None and key in cache:
+        return clone_transit_for_route(cache[key], route_type, route_order)
     try:
         transit, _ = find_route(origin, destination, route_type, route_order)
+        if cache is not None:
+            cache[key] = clone_transit_for_route(transit, route_type, route_order)
         return transit
     except Exception:
         minutes = estimate_transit_minutes(
@@ -1243,6 +1298,8 @@ def resolve_transit(
             raise
         fallback.route_type = route_type
         fallback.route_order = route_order
+        if cache is not None:
+            cache[key] = clone_transit_for_route(fallback, route_type, route_order)
         return fallback
 
 

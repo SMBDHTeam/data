@@ -36,8 +36,8 @@ from schedule.preview_service import (
     get_preview,
 )
 from schedule.service import (
-    CANDIDATE_POOL,
-    CANDIDATE_POOL_SOURCE,
+    current_candidate_pool,
+    current_candidate_pool_source,
     db_runtime_status,
     create_schedule,
     get_schedule,
@@ -390,11 +390,12 @@ log = logging.getLogger("data.app")
 
 @app.get("/health")
 def health() -> dict[str, str | int | bool | None]:
+    candidate_pool = current_candidate_pool()
     return {
         "status": "ok",
         "model_path": str(MODEL_PATH),
-        "schedule_candidate_source": CANDIDATE_POOL_SOURCE,
-        "schedule_candidate_count": len(CANDIDATE_POOL),
+        "schedule_candidate_source": current_candidate_pool_source(),
+        "schedule_candidate_count": len(candidate_pool),
         "schedule_db_enabled": db_runtime_status()["db_enabled"],
         "schedule_db_host": db_runtime_status()["db_host"],
         "odsay_enabled": os.getenv("ODSAY_ENABLED", "false").lower() == "true",

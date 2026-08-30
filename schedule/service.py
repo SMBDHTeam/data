@@ -313,6 +313,10 @@ def cached_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidateP
     return {place_id: cache[place_id] for place_id in unique_ids if place_id in cache}
 
 
+def warm_candidate_place_cache(place_ids: list[int]) -> None:
+    cached_candidate_places_by_ids(place_ids)
+
+
 def db_runtime_status() -> dict[str, str | bool | None]:
     dsn, _, _ = resolve_db_dsn()
     parsed = urlsplit(dsn) if dsn else None
@@ -478,6 +482,14 @@ def create_schedule(
     owner_id: int | None = None,
 ) -> ScheduleResponse:
     with schedule_route_cache_scope():
+        prefetch_place_ids = list(request.must_visit_place_ids)
+        if fixed_events_by_day:
+            prefetch_place_ids.extend(
+                event.place_id
+                for events in fixed_events_by_day.values()
+                for event in events
+            )
+        warm_candidate_place_cache(prefetch_place_ids)
         candidate_source = current_candidate_pool_source()
         log.info(
             "schedule build started. previewId=%s, startDate=%s, endDate=%s, candidateSource=%s",
@@ -591,6 +603,13 @@ def get_schedule(schedule_id: UUID) -> ScheduleResponse:
 
 def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> ScheduleResponse:
     with schedule_route_cache_scope():
+        warm_candidate_place_cache(
+            [
+                patch_stop.place_id
+                for patch_stop in request.stops
+                if patch_stop.stop_id is None and patch_stop.place_id is not None
+            ]
+        )
         existing = get_schedule(schedule_id)
         days_by_no = {day.day_no: day.model_copy(deep=True) for day in existing.days}
         existing_stop_index = {

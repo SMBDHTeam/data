@@ -159,6 +159,10 @@ CANDIDATE_RANK_CACHE: ContextVar[dict[CandidateRankCacheKey, tuple[int, int, int
     "schedule_candidate_rank_cache",
     default=None,
 )
+PLACE_LOOKUP_CACHE: ContextVar[dict[int, CandidatePlace] | None] = ContextVar(
+    "schedule_place_lookup_cache",
+    default=None,
+)
 
 
 DEFAULT_CANDIDATES = [
@@ -286,6 +290,27 @@ def load_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidatePla
         return None
 
     return {candidate.id: candidate for candidate in rows_to_candidates(rows)}
+
+
+def cached_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidatePlace] | None:
+    unique_ids = dedupe_ints(place_ids)
+    if not unique_ids:
+        return {}
+    cache = PLACE_LOOKUP_CACHE.get()
+    if cache is None:
+        return load_candidate_places_by_ids(unique_ids)
+
+    missing_ids = [place_id for place_id in unique_ids if place_id not in cache]
+    if missing_ids:
+        loaded = load_candidate_places_by_ids(missing_ids)
+        if loaded is None:
+            return None
+        for place_id in missing_ids:
+            candidate = loaded.get(place_id)
+            if candidate is not None:
+                cache[place_id] = candidate
+
+    return {place_id: cache[place_id] for place_id in unique_ids if place_id in cache}
 
 
 def db_runtime_status() -> dict[str, str | bool | None]:
@@ -1245,12 +1270,15 @@ def schedule_route_cache_scope():
     cache: dict[RouteCacheKey, ScheduleTransit] = {}
     profile_cache: dict[PlaceProfileCacheKey, ExperienceProfile] = {}
     rank_cache: dict[CandidateRankCacheKey, tuple[int, int, int, int, int, float]] = {}
+    place_lookup_cache: dict[int, CandidatePlace] = {}
     route_token = ROUTE_CACHE.set(cache)
     profile_token = PLACE_PROFILE_CACHE.set(profile_cache)
     rank_token = CANDIDATE_RANK_CACHE.set(rank_cache)
+    place_lookup_token = PLACE_LOOKUP_CACHE.set(place_lookup_cache)
     try:
         yield cache
     finally:
+        PLACE_LOOKUP_CACHE.reset(place_lookup_token)
         CANDIDATE_RANK_CACHE.reset(rank_token)
         PLACE_PROFILE_CACHE.reset(profile_token)
         ROUTE_CACHE.reset(route_token)
@@ -1615,7 +1643,7 @@ def resolve_place_or_400(place_id: int) -> CandidatePlace:
     for candidate in current_candidate_pool():
         if candidate.id == place_id:
             return candidate
-    resolved = (load_candidate_places_by_ids([place_id]) or {}).get(place_id)
+    resolved = (cached_candidate_places_by_ids([place_id]) or {}).get(place_id)
     if resolved is None:
         raise HTTPException(status_code=400, detail=f"placeId {place_id} does not exist")
     return resolved
@@ -1646,7 +1674,7 @@ def choose_candidate_places(
     candidate_pool = current_candidate_pool()
     pool_by_id = {item.id: item for item in candidate_pool}
     missing_ids = [pid for pid in must_visit_ids if pid not in pool_by_id]
-    resolved_from_db = load_candidate_places_by_ids(missing_ids) or {}
+    resolved_from_db = cached_candidate_places_by_ids(missing_ids) or {}
 
     for place_id in must_visit_ids:
         candidate = pool_by_id.get(place_id) or resolved_from_db.get(place_id)

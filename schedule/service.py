@@ -13,7 +13,10 @@ from decimal import Decimal
 from pathlib import Path
 from threading import Lock
 from time import monotonic
+from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -61,7 +64,11 @@ MIN_STAY_MINUTES = 30
 MAX_STOPS_PER_DAY = 5
 EARLY_FINISH_BUFFER_MINUTES = 180
 MIN_DAY_UTILIZATION_RATIO = 0.7
+TARGET_DAY_UNUSED_BUFFER_MINUTES = 90
+TARGET_DAY_UTILIZATION_RATIO = 0.85
 CANDIDATE_POOL_TTL_SECONDS = max(5, int(os.getenv("SCHEDULE_CANDIDATE_POOL_TTL_SECONDS", "60")))
+SCHEDULE_AI_RERANK_TOP_N = max(4, int(os.getenv("SCHEDULE_AI_RERANK_TOP_N", "12")))
+SCHEDULE_AI_RERANK_TIMEOUT_SECONDS = max(2.0, float(os.getenv("SCHEDULE_AI_RERANK_TIMEOUT_SECONDS", "8")))
 
 THEME_PLACEHOLDER_NAMES = {
     "THEME_FOOD": ["로컬 맛집", "시장 먹거리", "바다뷰 카페", "디저트 스팟", "해산물 식당"],
@@ -161,6 +168,11 @@ CANDIDATE_RANK_CACHE: ContextVar[dict[CandidateRankCacheKey, tuple[float, int, i
 )
 PLACE_LOOKUP_CACHE: ContextVar[dict[int, CandidatePlace] | None] = ContextVar(
     "schedule_place_lookup_cache",
+    default=None,
+)
+AiRerankCacheKey = tuple[str, str, str]
+AI_RERANK_CACHE: ContextVar[dict[AiRerankCacheKey, list[int]] | None] = ContextVar(
+    "schedule_ai_rerank_cache",
     default=None,
 )
 
@@ -315,6 +327,32 @@ def cached_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidateP
 
 def warm_candidate_place_cache(place_ids: list[int]) -> None:
     cached_candidate_places_by_ids(place_ids)
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def ai_rerank_runtime_status() -> dict[str, str | bool | int | float | None]:
+    enabled = env_flag("SCHEDULE_AI_RERANK_ENABLED", False)
+    api_key = os.getenv("SCHEDULE_AI_RERANK_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
+    model = os.getenv("SCHEDULE_AI_RERANK_MODEL", "").strip() or None
+    base_url = (
+        os.getenv("SCHEDULE_AI_RERANK_BASE_URL", "").strip()
+        or os.getenv("OPENAI_BASE_URL", "").strip()
+        or "https://api.openai.com/v1"
+    ).rstrip("/")
+    return {
+        "enabled": enabled,
+        "configured": enabled and bool(api_key) and bool(model),
+        "base_url": base_url,
+        "model": model,
+        "top_n": SCHEDULE_AI_RERANK_TOP_N,
+        "timeout_seconds": SCHEDULE_AI_RERANK_TIMEOUT_SECONDS,
+    }
 
 
 def db_runtime_status() -> dict[str, str | bool | None]:
@@ -1190,6 +1228,20 @@ def visit_duration_minutes(candidate: CandidatePlace) -> int:
     return 60
 
 
+def max_visit_duration_minutes(candidate: CandidatePlace) -> int:
+    if candidate.content_type_id == "15":
+        return 120
+    if candidate.content_type_id == "39":
+        return 105
+    if candidate.content_type_id == "14":
+        return 120
+    if candidate.content_type_id == "28":
+        return 105
+    if candidate.content_type_id == "38":
+        return 90
+    return 120
+
+
 def estimate_transit_minutes(
     start_lon: Decimal,
     start_lat: Decimal,
@@ -1288,15 +1340,18 @@ def dedupe_warnings(warnings: list[str]) -> list[str]:
 def schedule_route_cache_scope():
     cache: dict[RouteCacheKey, ScheduleTransit] = {}
     profile_cache: dict[PlaceProfileCacheKey, ExperienceProfile] = {}
-    rank_cache: dict[CandidateRankCacheKey, tuple[int, int, int, int, int, float]] = {}
+    rank_cache: dict[CandidateRankCacheKey, tuple[float, int, int, int, int, float]] = {}
     place_lookup_cache: dict[int, CandidatePlace] = {}
+    ai_rerank_cache: dict[AiRerankCacheKey, list[int]] = {}
     route_token = ROUTE_CACHE.set(cache)
     profile_token = PLACE_PROFILE_CACHE.set(profile_cache)
     rank_token = CANDIDATE_RANK_CACHE.set(rank_cache)
     place_lookup_token = PLACE_LOOKUP_CACHE.set(place_lookup_cache)
+    ai_rerank_token = AI_RERANK_CACHE.set(ai_rerank_cache)
     try:
         yield cache
     finally:
+        AI_RERANK_CACHE.reset(ai_rerank_token)
         PLACE_LOOKUP_CACHE.reset(place_lookup_token)
         CANDIDATE_RANK_CACHE.reset(rank_token)
         PLACE_PROFILE_CACHE.reset(profile_token)
@@ -1392,6 +1447,214 @@ def cached_candidate_rank(
     if cache is not None:
         cache[key] = rank
     return rank
+
+
+def ai_rerank_cache_key(
+    planned_day: PlannedDay,
+    request: ScheduleCreateRequest,
+    candidates: list[CandidatePlace],
+) -> AiRerankCacheKey:
+    return (
+        planned_day.date.isoformat(),
+        theme_signature(selected_theme_answer_ids(request)),
+        ",".join(str(candidate.id) for candidate in candidates[:SCHEDULE_AI_RERANK_TOP_N]),
+    )
+
+
+def ai_rerank_candidate_payload(candidate: CandidatePlace, planned_day: PlannedDay) -> dict[str, Any]:
+    profile = cached_place_profile(candidate)
+    themes = candidate_themes(candidate)
+    distance_from_start = int(
+        round(
+            distance_meters(
+                planned_day.start_location.longitude,
+                planned_day.start_location.latitude,
+                candidate.longitude,
+                candidate.latitude,
+            )
+        )
+    )
+    distance_from_end = int(
+        round(
+            distance_meters(
+                planned_day.end_location.longitude,
+                planned_day.end_location.latitude,
+                candidate.longitude,
+                candidate.latitude,
+            )
+        )
+    )
+    return {
+        "id": candidate.id,
+        "name": candidate.name,
+        "categoryLabel": candidate.category_label,
+        "contentTypeId": candidate.content_type_id,
+        "themes": themes,
+        "experienceType": profile.experience_type,
+        "semanticGroup": profile.semantic_group,
+        "distanceFromStartMeters": distance_from_start,
+        "distanceFromEndMeters": distance_from_end,
+    }
+
+
+def ai_rerank_request_payload(
+    planned_day: PlannedDay,
+    request: ScheduleCreateRequest,
+    candidates: list[CandidatePlace],
+) -> dict[str, Any]:
+    return {
+        "tripContext": {
+            "date": planned_day.date.isoformat(),
+            "dayNo": planned_day.day_no,
+            "startTime": planned_day.start_time.isoformat(),
+            "endTime": planned_day.end_time.isoformat(),
+            "startLocation": planned_day.start_location.name,
+            "endLocation": planned_day.end_location.name,
+        },
+        "selectedAnswers": [
+            {"questionId": answer.question_id, "answerId": answer.answer_id}
+            for answer in request.selected_answers
+        ],
+        "instruction": (
+            "Choose the best candidate order for a Busan day itinerary. "
+            "Prefer candidates that match the selected themes together, feel coherent for one day, "
+            "and avoid picks that are too far or too repetitive. "
+            "Return only candidate ids from the list."
+        ),
+        "candidates": [
+            ai_rerank_candidate_payload(candidate, planned_day)
+            for candidate in candidates[:SCHEDULE_AI_RERANK_TOP_N]
+        ],
+    }
+
+
+def extract_json_object(text: str) -> str | None:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return None
+
+
+def parse_ai_ordered_ids(content: str) -> list[int]:
+    extracted = extract_json_object(content) or content
+    payload = json.loads(extracted)
+    if isinstance(payload, list):
+        ordered_ids = payload
+    else:
+        ordered_ids = payload.get("ordered_ids") or payload.get("orderedIds") or payload.get("candidate_ids") or []
+    parsed: list[int] = []
+    for value in ordered_ids:
+        try:
+            parsed.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
+
+def request_ai_rerank_order(
+    planned_day: PlannedDay,
+    request: ScheduleCreateRequest,
+    candidates: list[CandidatePlace],
+) -> list[int] | None:
+    runtime = ai_rerank_runtime_status()
+    if not runtime["configured"]:
+        return None
+
+    api_key = os.getenv("SCHEDULE_AI_RERANK_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
+    model = str(runtime["model"])
+    base_url = str(runtime["base_url"]).rstrip("/")
+    body = {
+        "model": model,
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You rerank itinerary candidates. "
+                    "Return strict JSON only in the form {\"ordered_ids\":[...]} "
+                    "using only ids from the provided candidates."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    ai_rerank_request_payload(planned_day, request, candidates),
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+    }
+    request_url = f"{base_url}/chat/completions"
+    http_request = Request(
+        request_url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(http_request, timeout=SCHEDULE_AI_RERANK_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError:
+        log.exception("schedule ai rerank request failed with http error")
+        return None
+    except URLError:
+        log.exception("schedule ai rerank request failed with network error")
+        return None
+    except Exception:
+        log.exception("schedule ai rerank request failed")
+        return None
+
+    try:
+        content = payload["choices"][0]["message"]["content"]
+        ordered_ids = parse_ai_ordered_ids(content)
+    except Exception:
+        log.exception("schedule ai rerank response parse failed")
+        return None
+
+    if not ordered_ids:
+        return None
+    allowed_ids = {candidate.id for candidate in candidates[:SCHEDULE_AI_RERANK_TOP_N]}
+    return [candidate_id for candidate_id in ordered_ids if candidate_id in allowed_ids]
+
+
+def ai_rerank_candidates(
+    planned_day: PlannedDay,
+    request: ScheduleCreateRequest,
+    candidates: list[CandidatePlace],
+) -> list[CandidatePlace]:
+    runtime = ai_rerank_runtime_status()
+    if not runtime["enabled"] or len(candidates) < 3:
+        return candidates
+
+    top_candidates = candidates[:SCHEDULE_AI_RERANK_TOP_N]
+    if len(top_candidates) < 3:
+        return candidates
+
+    cache = AI_RERANK_CACHE.get()
+    cache_key = ai_rerank_cache_key(planned_day, request, top_candidates)
+    ordered_ids: list[int] | None = None
+    if cache is not None:
+        ordered_ids = cache.get(cache_key)
+    if ordered_ids is None:
+        ordered_ids = request_ai_rerank_order(planned_day, request, top_candidates)
+        if cache is not None and ordered_ids is not None:
+            cache[cache_key] = ordered_ids
+    if not ordered_ids:
+        return candidates
+
+    top_by_id = {candidate.id: candidate for candidate in top_candidates}
+    reranked_top = [top_by_id[candidate_id] for candidate_id in ordered_ids if candidate_id in top_by_id]
+    used_ids = {candidate.id for candidate in reranked_top}
+    tail_top = [candidate for candidate in top_candidates if candidate.id not in used_ids]
+    return reranked_top + tail_top + candidates[SCHEDULE_AI_RERANK_TOP_N :]
 
 
 def clone_transit_for_route(
@@ -1737,6 +2000,7 @@ def choose_candidate_places(
         ),
         key=lambda candidate: cached_candidate_rank(candidate, planned_day, request, theme_answer_ids),
     )
+    ranked = ai_rerank_candidates(planned_day, request, ranked)
     # 앞선 일차에서 쓴 장소는 뒤로 미룬다. 완전히 배제하지 않는 이유는 후보 풀이
     # 작을 때 일차가 비는 것을 막기 위해서다.
     unused_first = [c for c in ranked if c.id not in already_used]
@@ -1930,6 +2194,13 @@ def repair_schedule_days(
                 dirty_indexes.add(index)
                 warnings.append("하루 활동 시간이 너무 짧지 않도록 방문지를 추가로 배치했습니다.")
                 changed = True
+                continue
+            extended = try_extend_underfilled_day_stays(day)
+            if extended is not None:
+                repaired[index] = extended
+                dirty_indexes.add(index)
+                warnings.append("하루 활동 시간이 너무 짧지 않도록 일부 방문지 체류 시간을 늘렸습니다.")
+                changed = True
     for index in sorted(dirty_indexes):
         repaired[index] = recalculate_day(repaired[index], repaired[index].stops)
     return repaired, dedupe_warnings(warnings)
@@ -2091,6 +2362,79 @@ def try_expand_underfilled_day(
     if best_day is current_day:
         return None
     return best_day
+
+
+def target_used_minutes_for_underfilled_day(day: ScheduleDay) -> int:
+    available = day_available_minutes(day)
+    if available <= 0:
+        return 0
+    return min(
+        available,
+        max(
+            int(available * TARGET_DAY_UTILIZATION_RATIO),
+            available - TARGET_DAY_UNUSED_BUFFER_MINUTES,
+        ),
+    )
+
+
+def extendable_stay_minutes(stop: ScheduleStop) -> int:
+    if stop.fixed_starts_at is not None:
+        return 0
+    candidate = CandidatePlace(
+        id=stop.place.id or 0,
+        external_id=str(stop.place.id or 0),
+        content_type_id=stop.place.category or "12",
+        name=stop.place.name,
+        category_label=stop.place.category_label,
+        address=stop.place.address,
+        longitude=stop.place.longitude or Decimal("129.0403"),
+        latitude=stop.place.latitude or Decimal("35.1151"),
+    )
+    return max(0, max_visit_duration_minutes(candidate) - stop.stay_minutes)
+
+
+def try_extend_underfilled_day_stays(day: ScheduleDay) -> ScheduleDay | None:
+    if not day_underfilled(day):
+        return None
+    target_used = target_used_minutes_for_underfilled_day(day)
+    current_used = day_used_minutes(day)
+    extra_needed = max(0, target_used - current_used)
+    if extra_needed <= 0:
+        return None
+
+    adjusted_stops = [stop.model_copy(deep=True) for stop in day.stops]
+    if not adjusted_stops:
+        return None
+
+    changed = False
+    while extra_needed > 0:
+        progressed = False
+        for stop in adjusted_stops:
+            capacity = extendable_stay_minutes(stop)
+            if capacity <= 0:
+                continue
+            addition = min(capacity, 15, extra_needed)
+            stop.stay_minutes += addition
+            stop.warnings = dedupe_warnings(
+                stop.warnings + ["하루 활동 시간이 너무 짧지 않도록 체류 시간이 일부 늘어났습니다."]
+            )
+            extra_needed -= addition
+            progressed = True
+            changed = True
+            if extra_needed <= 0:
+                break
+        if not progressed:
+            break
+
+    if not changed:
+        return None
+
+    extended_day = recalculate_day(day, adjusted_stops)
+    if day_overrun_minutes(extended_day) > 0:
+        return None
+    if day_used_minutes(extended_day) <= day_used_minutes(day):
+        return None
+    return extended_day
 
 
 def distance_meters(

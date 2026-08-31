@@ -155,7 +155,7 @@ PLACE_PROFILE_CACHE: ContextVar[dict[PlaceProfileCacheKey, ExperienceProfile] | 
     default=None,
 )
 CandidateRankCacheKey = tuple[int, int, str, str, str, str, str, str, bool, bool, bool, bool]
-CANDIDATE_RANK_CACHE: ContextVar[dict[CandidateRankCacheKey, tuple[int, int, int, int, int, float]] | None] = ContextVar(
+CANDIDATE_RANK_CACHE: ContextVar[dict[CandidateRankCacheKey, tuple[float, int, int, int, int, float]] | None] = ContextVar(
     "schedule_candidate_rank_cache",
     default=None,
 )
@@ -1351,11 +1351,15 @@ def request_rank_flags(request: ScheduleCreateRequest) -> tuple[bool, bool, bool
     )
 
 
+def theme_signature(theme_answer_ids: list[str]) -> str:
+    return "|".join(theme_answer_ids)
+
+
 def candidate_rank_cache_key(
     candidate: CandidatePlace,
     planned_day: PlannedDay,
     request: ScheduleCreateRequest,
-    theme_answer_id: str | None,
+    theme_answer_ids: list[str],
 ) -> CandidateRankCacheKey:
     pace_packed, pace_relaxed, low_mobility, transit_simple = request_rank_flags(request)
     return (
@@ -1366,7 +1370,7 @@ def candidate_rank_cache_key(
         rounded_coord(planned_day.start_location.latitude),
         rounded_coord(planned_day.end_location.longitude),
         rounded_coord(planned_day.end_location.latitude),
-        theme_answer_id or "",
+        theme_signature(theme_answer_ids),
         pace_packed,
         pace_relaxed,
         low_mobility,
@@ -1378,13 +1382,13 @@ def cached_candidate_rank(
     candidate: CandidatePlace,
     planned_day: PlannedDay,
     request: ScheduleCreateRequest,
-    theme_answer_id: str | None,
-) -> tuple[int, int, int, int, int, float]:
+    theme_answer_ids: list[str],
+) -> tuple[float, int, int, int, int, float]:
     cache = CANDIDATE_RANK_CACHE.get()
-    key = candidate_rank_cache_key(candidate, planned_day, request, theme_answer_id)
+    key = candidate_rank_cache_key(candidate, planned_day, request, theme_answer_ids)
     if cache is not None and key in cache:
         return cache[key]
-    rank = candidate_rank(candidate, planned_day, request, theme_answer_id)
+    rank = candidate_rank(candidate, planned_day, request, theme_answer_ids)
     if cache is not None:
         cache[key] = rank
     return rank
@@ -1609,10 +1613,18 @@ def policy_target_count(available_minutes: int, request: ScheduleCreateRequest) 
 
 
 def primary_theme_answer_id(request: ScheduleCreateRequest) -> str | None:
-    for answer in request.selected_answers:
-        if answer.question_id == "THEME":
-            return answer.answer_id
+    theme_answer_ids = selected_theme_answer_ids(request)
+    if theme_answer_ids:
+        return theme_answer_ids[0]
     return None
+
+
+def selected_theme_answer_ids(request: ScheduleCreateRequest) -> list[str]:
+    return [
+        answer.answer_id
+        for answer in request.selected_answers
+        if answer.question_id == "THEME"
+    ]
 
 
 def has_answer(request: ScheduleCreateRequest, answer_id: str) -> bool:
@@ -1716,14 +1728,14 @@ def choose_candidate_places(
     if remaining == 0:
         return resolved[:target_count]
 
-    theme_answer_id = primary_theme_answer_id(request)
+    theme_answer_ids = selected_theme_answer_ids(request)
     ranked = sorted(
         (
             candidate
             for candidate in candidate_pool
             if candidate.id not in seen_ids and not is_day_endpoint(candidate, planned_day)
         ),
-        key=lambda candidate: cached_candidate_rank(candidate, planned_day, request, theme_answer_id),
+        key=lambda candidate: cached_candidate_rank(candidate, planned_day, request, theme_answer_ids),
     )
     # 앞선 일차에서 쓴 장소는 뒤로 미룬다. 완전히 배제하지 않는 이유는 후보 풀이
     # 작을 때 일차가 비는 것을 막기 위해서다.
@@ -1796,9 +1808,9 @@ def candidate_rank(
     candidate: CandidatePlace,
     planned_day: PlannedDay,
     request: ScheduleCreateRequest,
-    theme_answer_id: str | None,
-) -> tuple[int, int, int, int, int, float]:
-    theme_penalty = theme_penalty_score(candidate, theme_answer_id)
+    theme_answer_ids: list[str],
+) -> tuple[float, int, int, int, int, float]:
+    theme_penalty = theme_penalty_score(candidate, theme_answer_ids)
     pace_penalty = pace_penalty_score(candidate, request)
     mobility_penalty = mobility_penalty_score(candidate, request)
     transit_penalty = transfer_penalty_score(candidate, planned_day, request)
@@ -2129,15 +2141,36 @@ def candidate_themes(candidate: CandidatePlace) -> list[str]:
     return ordered
 
 
-def theme_penalty_score(candidate: CandidatePlace, theme_answer_id: str | None) -> int:
-    if theme_answer_id is None:
+def theme_match_penalty(candidate_themes: list[str], theme_answer_id: str) -> int:
+    if theme_answer_id in candidate_themes:
         return 0
-    themes = candidate_themes(candidate)
-    if theme_answer_id in themes:
-        return 0
-    if theme_answer_id == "THEME_HEALING" and any(theme in themes for theme in ("THEME_NATURE", "THEME_FOOD")):
+    if theme_answer_id == "THEME_HEALING" and any(theme in candidate_themes for theme in ("THEME_NATURE", "THEME_FOOD")):
         return 1
     return 3
+
+
+def theme_penalty_score(candidate: CandidatePlace, theme_answer_ids: list[str]) -> float:
+    if not theme_answer_ids:
+        return 0.0
+    themes = candidate_themes(candidate)
+    weighted_penalty = 0.0
+    matched_count = 0
+    for index, theme_answer_id in enumerate(theme_answer_ids):
+        if index == 0:
+            weight = 1.0
+        elif index == 1:
+            weight = 0.7
+        elif index == 2:
+            weight = 0.4
+        else:
+            weight = 0.25
+        match_penalty = theme_match_penalty(themes, theme_answer_id)
+        weighted_penalty += match_penalty * weight
+        if match_penalty == 0:
+            matched_count += 1
+    if matched_count >= 2:
+        weighted_penalty -= 0.5
+    return max(0.0, weighted_penalty)
 
 
 def pace_penalty_score(candidate: CandidatePlace, request: ScheduleCreateRequest) -> int:

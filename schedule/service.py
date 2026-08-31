@@ -1596,9 +1596,11 @@ def policy_target_count(available_minutes: int, request: ScheduleCreateRequest) 
             return 4
         return 3
     if has_answer(request, "PACE_RELAXED"):
+        if available_minutes >= 480:
+            return 4
         if available_minutes >= 360:
             return 3
-        return 3
+        return 2
     if available_minutes >= 480:
         return 4
     if available_minutes >= 360:

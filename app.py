@@ -36,7 +36,6 @@ from schedule.preview_service import (
     get_preview,
 )
 from schedule.service import (
-    ai_rerank_runtime_status,
     current_candidate_pool,
     current_candidate_pool_source,
     db_runtime_status,
@@ -392,7 +391,6 @@ log = logging.getLogger("data.app")
 @app.get("/health")
 def health() -> dict[str, str | int | bool | None]:
     candidate_pool = current_candidate_pool()
-    ai_rerank = ai_rerank_runtime_status()
     return {
         "status": "ok",
         "model_path": str(MODEL_PATH),
@@ -400,9 +398,6 @@ def health() -> dict[str, str | int | bool | None]:
         "schedule_candidate_count": len(candidate_pool),
         "schedule_db_enabled": db_runtime_status()["db_enabled"],
         "schedule_db_host": db_runtime_status()["db_host"],
-        "schedule_ai_rerank_enabled": bool(ai_rerank["enabled"]),
-        "schedule_ai_rerank_configured": bool(ai_rerank["configured"]),
-        "schedule_ai_rerank_model": ai_rerank["model"],
         "odsay_enabled": os.getenv("ODSAY_ENABLED", "false").lower() == "true",
         "tmap_walking_enabled": os.getenv("TMAP_WALKING_ENABLED", "false").lower() == "true",
     }

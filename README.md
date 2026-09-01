@@ -181,29 +181,6 @@ underfilled day 보정 로직을 사용합니다.
 
 1. 규칙 기반으로 상위 후보를 먼저 추림
 2. LLM 이 상위 후보 일부를 하루 맥락 기준으로 재정렬
-3. FastAPI 가 다시 시간/이동 가능 여부를 검증
-
-즉, AI 가 전체 일정을 직접 확정하지 않고
-"어떤 후보를 더 우선할지"만 보정합니다.
-
-현재 env:
-
-- `SCHEDULE_AI_RERANK_ENABLED`
-- `SCHEDULE_AI_RERANK_API_KEY`
-- `SCHEDULE_AI_RERANK_MODEL`
-- `SCHEDULE_AI_RERANK_BASE_URL`
-- `SCHEDULE_AI_RERANK_TOP_N`
-- `SCHEDULE_AI_RERANK_TIMEOUT_SECONDS`
-
-기본값은 비활성화이며,
-AI 호출이 실패하면 기존 규칙 기반 정렬로 즉시 fallback 합니다.
-
-`/health` 에서 아래 값으로 상태를 확인할 수 있습니다.
-
-- `schedule_ai_rerank_enabled`
-- `schedule_ai_rerank_configured`
-- `schedule_ai_rerank_model`
-
 ## 지금 실제 운영에서 확인된 상태
 
 ### 완료된 것

@@ -13,10 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from threading import Lock
 from time import monotonic
-from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -67,8 +64,6 @@ MIN_DAY_UTILIZATION_RATIO = 0.7
 TARGET_DAY_UNUSED_BUFFER_MINUTES = 90
 TARGET_DAY_UTILIZATION_RATIO = 0.85
 CANDIDATE_POOL_TTL_SECONDS = max(5, int(os.getenv("SCHEDULE_CANDIDATE_POOL_TTL_SECONDS", "60")))
-SCHEDULE_AI_RERANK_TOP_N = max(4, int(os.getenv("SCHEDULE_AI_RERANK_TOP_N", "12")))
-SCHEDULE_AI_RERANK_TIMEOUT_SECONDS = max(2.0, float(os.getenv("SCHEDULE_AI_RERANK_TIMEOUT_SECONDS", "8")))
 
 THEME_PLACEHOLDER_NAMES = {
     "THEME_FOOD": ["로컬 맛집", "시장 먹거리", "바다뷰 카페", "디저트 스팟", "해산물 식당"],
@@ -154,12 +149,6 @@ class FixedEventSpec:
     ends_at: datetime
 
 
-@dataclass(frozen=True)
-class AiDayFlowPlan:
-    ordered_ids: list[int]
-    slot_by_id: dict[int, str]
-
-
 RouteCacheKey = tuple[str, str, str, str, str]
 ROUTE_CACHE: ContextVar[dict[RouteCacheKey, ScheduleTransit] | None] = ContextVar("schedule_route_cache", default=None)
 PlaceProfileCacheKey = tuple[int, str, str]
@@ -174,15 +163,6 @@ CANDIDATE_RANK_CACHE: ContextVar[dict[CandidateRankCacheKey, tuple[float, int, i
 )
 PLACE_LOOKUP_CACHE: ContextVar[dict[int, CandidatePlace] | None] = ContextVar(
     "schedule_place_lookup_cache",
-    default=None,
-)
-AiRerankCacheKey = tuple[str, str, str]
-AI_RERANK_CACHE: ContextVar[dict[AiRerankCacheKey, list[int]] | None] = ContextVar(
-    "schedule_ai_rerank_cache",
-    default=None,
-)
-AI_DAY_FLOW_CACHE: ContextVar[dict[AiRerankCacheKey, AiDayFlowPlan] | None] = ContextVar(
-    "schedule_ai_day_flow_cache",
     default=None,
 )
 
@@ -337,32 +317,6 @@ def cached_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidateP
 
 def warm_candidate_place_cache(place_ids: list[int]) -> None:
     cached_candidate_places_by_ids(place_ids)
-
-
-def env_flag(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def ai_rerank_runtime_status() -> dict[str, str | bool | int | float | None]:
-    enabled = env_flag("SCHEDULE_AI_RERANK_ENABLED", False)
-    api_key = os.getenv("SCHEDULE_AI_RERANK_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
-    model = os.getenv("SCHEDULE_AI_RERANK_MODEL", "").strip() or None
-    base_url = (
-        os.getenv("SCHEDULE_AI_RERANK_BASE_URL", "").strip()
-        or os.getenv("OPENAI_BASE_URL", "").strip()
-        or "https://api.openai.com/v1"
-    ).rstrip("/")
-    return {
-        "enabled": enabled,
-        "configured": enabled and bool(api_key) and bool(model),
-        "base_url": base_url,
-        "model": model,
-        "top_n": SCHEDULE_AI_RERANK_TOP_N,
-        "timeout_seconds": SCHEDULE_AI_RERANK_TIMEOUT_SECONDS,
-    }
 
 
 def db_runtime_status() -> dict[str, str | bool | None]:
@@ -864,14 +818,6 @@ def build_stops(
     if not candidates:
         return []
     candidates = order_candidates_for_day(planned_day, candidates, fixed_events)
-    ai_day_flow = ai_plan_day_candidate_flow(planned_day, request, candidates, fixed_events)
-    ai_slot_by_id = ai_day_flow.slot_by_id if ai_day_flow is not None else {}
-    if ai_day_flow is not None:
-        candidate_by_id = {candidate.id: candidate for candidate in candidates}
-        ordered_candidates = [candidate_by_id[candidate_id] for candidate_id in ai_day_flow.ordered_ids if candidate_id in candidate_by_id]
-        used_ids = {candidate.id for candidate in ordered_candidates}
-        ordered_candidates.extend(candidate for candidate in candidates if candidate.id not in used_ids)
-        candidates = ordered_candidates
 
     start_dt = datetime.combine(planned_day.date, planned_day.start_time)
     end_dt = datetime.combine(planned_day.date, planned_day.end_time)
@@ -917,9 +863,6 @@ def build_stops(
             request,
             fixed_event is not None,
         )
-        ai_slot = ai_slot_by_id.get(candidate.id)
-        if ai_slot:
-            stop_selection_reasons.append(f"ai_slot:{ai_slot.lower()}")
         stops.append(
             candidate_stop(
                 order=index,
@@ -1364,19 +1307,13 @@ def schedule_route_cache_scope():
     profile_cache: dict[PlaceProfileCacheKey, ExperienceProfile] = {}
     rank_cache: dict[CandidateRankCacheKey, tuple[float, int, int, int, int, float]] = {}
     place_lookup_cache: dict[int, CandidatePlace] = {}
-    ai_rerank_cache: dict[AiRerankCacheKey, list[int]] = {}
-    ai_day_flow_cache: dict[AiRerankCacheKey, AiDayFlowPlan] = {}
     route_token = ROUTE_CACHE.set(cache)
     profile_token = PLACE_PROFILE_CACHE.set(profile_cache)
     rank_token = CANDIDATE_RANK_CACHE.set(rank_cache)
     place_lookup_token = PLACE_LOOKUP_CACHE.set(place_lookup_cache)
-    ai_rerank_token = AI_RERANK_CACHE.set(ai_rerank_cache)
-    ai_day_flow_token = AI_DAY_FLOW_CACHE.set(ai_day_flow_cache)
     try:
         yield cache
     finally:
-        AI_DAY_FLOW_CACHE.reset(ai_day_flow_token)
-        AI_RERANK_CACHE.reset(ai_rerank_token)
         PLACE_LOOKUP_CACHE.reset(place_lookup_token)
         CANDIDATE_RANK_CACHE.reset(rank_token)
         PLACE_PROFILE_CACHE.reset(profile_token)
@@ -1472,395 +1409,6 @@ def cached_candidate_rank(
     if cache is not None:
         cache[key] = rank
     return rank
-
-
-def ai_rerank_cache_key(
-    planned_day: PlannedDay,
-    request: ScheduleCreateRequest,
-    candidates: list[CandidatePlace],
-) -> AiRerankCacheKey:
-    return (
-        planned_day.date.isoformat(),
-        theme_signature(selected_theme_answer_ids(request)),
-        ",".join(str(candidate.id) for candidate in candidates[:SCHEDULE_AI_RERANK_TOP_N]),
-    )
-
-
-def ai_rerank_candidate_payload(candidate: CandidatePlace, planned_day: PlannedDay) -> dict[str, Any]:
-    profile = cached_place_profile(candidate)
-    themes = candidate_themes(candidate)
-    distance_from_start = int(
-        round(
-            distance_meters(
-                planned_day.start_location.longitude,
-                planned_day.start_location.latitude,
-                candidate.longitude,
-                candidate.latitude,
-            )
-        )
-    )
-    distance_from_end = int(
-        round(
-            distance_meters(
-                planned_day.end_location.longitude,
-                planned_day.end_location.latitude,
-                candidate.longitude,
-                candidate.latitude,
-            )
-        )
-    )
-    return {
-        "id": candidate.id,
-        "name": candidate.name,
-        "categoryLabel": candidate.category_label,
-        "contentTypeId": candidate.content_type_id,
-        "themes": themes,
-        "experienceType": profile.experience_type,
-        "semanticGroup": profile.semantic_group,
-        "distanceFromStartMeters": distance_from_start,
-        "distanceFromEndMeters": distance_from_end,
-    }
-
-
-def ai_rerank_request_payload(
-    planned_day: PlannedDay,
-    request: ScheduleCreateRequest,
-    candidates: list[CandidatePlace],
-) -> dict[str, Any]:
-    return {
-        "tripContext": {
-            "date": planned_day.date.isoformat(),
-            "dayNo": planned_day.day_no,
-            "startTime": planned_day.start_time.isoformat(),
-            "endTime": planned_day.end_time.isoformat(),
-            "startLocation": planned_day.start_location.name,
-            "endLocation": planned_day.end_location.name,
-        },
-        "selectedAnswers": [
-            {"questionId": answer.question_id, "answerId": answer.answer_id}
-            for answer in request.selected_answers
-        ],
-        "instruction": (
-            "Choose the best candidate order for a Busan day itinerary. "
-            "Prefer candidates that match the selected themes together, feel coherent for one day, "
-            "and avoid picks that are too far or too repetitive. "
-            "Return only candidate ids from the list."
-        ),
-        "candidates": [
-            ai_rerank_candidate_payload(candidate, planned_day)
-            for candidate in candidates[:SCHEDULE_AI_RERANK_TOP_N]
-        ],
-    }
-
-
-def extract_json_object(text: str) -> str | None:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start : end + 1]
-    start = text.find("[")
-    end = text.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        return text[start : end + 1]
-    return None
-
-
-def parse_ai_ordered_ids(content: str) -> list[int]:
-    extracted = extract_json_object(content) or content
-    payload = json.loads(extracted)
-    if isinstance(payload, list):
-        ordered_ids = payload
-    else:
-        ordered_ids = payload.get("ordered_ids") or payload.get("orderedIds") or payload.get("candidate_ids") or []
-    parsed: list[int] = []
-    for value in ordered_ids:
-        try:
-            parsed.append(int(value))
-        except (TypeError, ValueError):
-            continue
-    return parsed
-
-
-def request_ai_rerank_order(
-    planned_day: PlannedDay,
-    request: ScheduleCreateRequest,
-    candidates: list[CandidatePlace],
-) -> list[int] | None:
-    runtime = ai_rerank_runtime_status()
-    if not runtime["configured"]:
-        return None
-
-    api_key = os.getenv("SCHEDULE_AI_RERANK_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
-    model = str(runtime["model"])
-    base_url = str(runtime["base_url"]).rstrip("/")
-    body = {
-        "model": model,
-        "temperature": 0.1,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You rerank itinerary candidates. "
-                    "Return strict JSON only in the form {\"ordered_ids\":[...]} "
-                    "using only ids from the provided candidates."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    ai_rerank_request_payload(planned_day, request, candidates),
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-    }
-    request_url = f"{base_url}/chat/completions"
-    http_request = Request(
-        request_url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(http_request, timeout=SCHEDULE_AI_RERANK_TIMEOUT_SECONDS) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError:
-        log.exception("schedule ai rerank request failed with http error")
-        return None
-    except URLError:
-        log.exception("schedule ai rerank request failed with network error")
-        return None
-    except Exception:
-        log.exception("schedule ai rerank request failed")
-        return None
-
-    try:
-        content = payload["choices"][0]["message"]["content"]
-        ordered_ids = parse_ai_ordered_ids(content)
-    except Exception:
-        log.exception("schedule ai rerank response parse failed")
-        return None
-
-    if not ordered_ids:
-        return None
-    allowed_ids = {candidate.id for candidate in candidates[:SCHEDULE_AI_RERANK_TOP_N]}
-    return [candidate_id for candidate_id in ordered_ids if candidate_id in allowed_ids]
-
-
-def ai_rerank_candidates(
-    planned_day: PlannedDay,
-    request: ScheduleCreateRequest,
-    candidates: list[CandidatePlace],
-) -> list[CandidatePlace]:
-    runtime = ai_rerank_runtime_status()
-    if not runtime["enabled"] or len(candidates) < 3:
-        return candidates
-
-    top_candidates = candidates[:SCHEDULE_AI_RERANK_TOP_N]
-    if len(top_candidates) < 3:
-        return candidates
-
-    cache = AI_RERANK_CACHE.get()
-    cache_key = ai_rerank_cache_key(planned_day, request, top_candidates)
-    ordered_ids: list[int] | None = None
-    if cache is not None:
-        ordered_ids = cache.get(cache_key)
-    if ordered_ids is None:
-        ordered_ids = request_ai_rerank_order(planned_day, request, top_candidates)
-        if cache is not None and ordered_ids is not None:
-            cache[cache_key] = ordered_ids
-    if not ordered_ids:
-        return candidates
-
-    top_by_id = {candidate.id: candidate for candidate in top_candidates}
-    reranked_top = [top_by_id[candidate_id] for candidate_id in ordered_ids if candidate_id in top_by_id]
-    used_ids = {candidate.id for candidate in reranked_top}
-    tail_top = [candidate for candidate in top_candidates if candidate.id not in used_ids]
-    return reranked_top + tail_top + candidates[SCHEDULE_AI_RERANK_TOP_N :]
-
-
-def preferred_day_slots(planned_day: PlannedDay) -> list[str]:
-    slots: list[str] = ["MORNING"]
-    active_slots = active_meal_slots(planned_day)
-    if any(slot.code == "LUNCH" for slot in active_slots):
-        slots.append("LUNCH")
-    slots.append("AFTERNOON")
-    if any(slot.code == "DINNER" for slot in active_slots):
-        slots.append("DINNER")
-    if planned_day.end_time >= time(18, 30):
-        slots.append("EVENING")
-    return slots
-
-
-def ai_day_flow_cache_key(
-    planned_day: PlannedDay,
-    request: ScheduleCreateRequest,
-    candidates: list[CandidatePlace],
-) -> AiRerankCacheKey:
-    return (
-        f"flow:{planned_day.date.isoformat()}",
-        theme_signature(selected_theme_answer_ids(request)),
-        ",".join(str(candidate.id) for candidate in candidates),
-    )
-
-
-def ai_day_flow_candidate_payload(candidate: CandidatePlace, planned_day: PlannedDay) -> dict[str, Any]:
-    payload = ai_rerank_candidate_payload(candidate, planned_day)
-    payload["isMealCandidate"] = is_meal_candidate(candidate)
-    payload["defaultStayMinutes"] = visit_duration_minutes(candidate)
-    return payload
-
-
-def parse_ai_day_flow_plan(content: str) -> AiDayFlowPlan | None:
-    extracted = extract_json_object(content) or content
-    payload = json.loads(extracted)
-    ordered_ids_raw = payload.get("ordered_ids") or payload.get("orderedIds") or payload.get("candidate_ids") or []
-    slot_by_id_raw = payload.get("slot_by_id") or payload.get("slotById") or {}
-    ordered_ids: list[int] = []
-    for value in ordered_ids_raw:
-        try:
-            ordered_ids.append(int(value))
-        except (TypeError, ValueError):
-            continue
-    slot_by_id: dict[int, str] = {}
-    if isinstance(slot_by_id_raw, dict):
-        for key, value in slot_by_id_raw.items():
-            try:
-                candidate_id = int(key)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(value, str):
-                continue
-            normalized = value.strip().upper()
-            if normalized:
-                slot_by_id[candidate_id] = normalized
-    if not ordered_ids:
-        return None
-    return AiDayFlowPlan(ordered_ids=ordered_ids, slot_by_id=slot_by_id)
-
-
-def request_ai_day_flow_plan(
-    planned_day: PlannedDay,
-    request: ScheduleCreateRequest,
-    candidates: list[CandidatePlace],
-) -> AiDayFlowPlan | None:
-    runtime = ai_rerank_runtime_status()
-    if not runtime["configured"]:
-        return None
-
-    api_key = os.getenv("SCHEDULE_AI_RERANK_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
-    model = str(runtime["model"])
-    base_url = str(runtime["base_url"]).rstrip("/")
-    body = {
-        "model": model,
-        "temperature": 0.1,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You arrange a one-day itinerary. "
-                    "Return strict JSON only in the form "
-                    "{\"ordered_ids\":[...],\"slot_by_id\":{\"id\":\"MORNING|LUNCH|AFTERNOON|DINNER|EVENING\"}}. "
-                    "Use only provided candidate ids."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "tripContext": {
-                            "date": planned_day.date.isoformat(),
-                            "dayNo": planned_day.day_no,
-                            "startTime": planned_day.start_time.isoformat(),
-                            "endTime": planned_day.end_time.isoformat(),
-                            "startLocation": planned_day.start_location.name,
-                            "endLocation": planned_day.end_location.name,
-                            "preferredSlots": preferred_day_slots(planned_day),
-                        },
-                        "selectedAnswers": [
-                            {"questionId": answer.question_id, "answerId": answer.answer_id}
-                            for answer in request.selected_answers
-                        ],
-                        "instruction": (
-                            "Arrange the candidates into a natural same-day flow. "
-                            "Prefer sightseeing in the morning, meal places around lunch or dinner, "
-                            "and calm scenic or cafe stops later in the day when appropriate. "
-                            "Do not invent new ids."
-                        ),
-                        "candidates": [
-                            ai_day_flow_candidate_payload(candidate, planned_day)
-                            for candidate in candidates
-                        ],
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-    }
-    http_request = Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(http_request, timeout=SCHEDULE_AI_RERANK_TIMEOUT_SECONDS) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError:
-        log.exception("schedule ai day flow request failed with http error")
-        return None
-    except URLError:
-        log.exception("schedule ai day flow request failed with network error")
-        return None
-    except Exception:
-        log.exception("schedule ai day flow request failed")
-        return None
-
-    try:
-        content = payload["choices"][0]["message"]["content"]
-        plan = parse_ai_day_flow_plan(content)
-    except Exception:
-        log.exception("schedule ai day flow response parse failed")
-        return None
-    if plan is None:
-        return None
-
-    allowed_ids = {candidate.id for candidate in candidates}
-    ordered_ids = [candidate_id for candidate_id in plan.ordered_ids if candidate_id in allowed_ids]
-    slot_by_id = {candidate_id: slot for candidate_id, slot in plan.slot_by_id.items() if candidate_id in allowed_ids}
-    if not ordered_ids:
-        return None
-    return AiDayFlowPlan(ordered_ids=ordered_ids, slot_by_id=slot_by_id)
-
-
-def ai_plan_day_candidate_flow(
-    planned_day: PlannedDay,
-    request: ScheduleCreateRequest,
-    candidates: list[CandidatePlace],
-    fixed_events: list[FixedEventSpec],
-) -> AiDayFlowPlan | None:
-    runtime = ai_rerank_runtime_status()
-    if not runtime["enabled"] or len(candidates) < 3 or fixed_events:
-        return None
-
-    cache = AI_DAY_FLOW_CACHE.get()
-    cache_key = ai_day_flow_cache_key(planned_day, request, candidates)
-    plan: AiDayFlowPlan | None = None
-    if cache is not None:
-        plan = cache.get(cache_key)
-    if plan is None:
-        plan = request_ai_day_flow_plan(planned_day, request, candidates)
-        if cache is not None and plan is not None:
-            cache[cache_key] = plan
-    if plan is None:
-        return None
-    return plan
 
 
 def clone_transit_for_route(
@@ -2206,7 +1754,6 @@ def choose_candidate_places(
         ),
         key=lambda candidate: cached_candidate_rank(candidate, planned_day, request, theme_answer_ids),
     )
-    ranked = ai_rerank_candidates(planned_day, request, ranked)
     # 앞선 일차에서 쓴 장소는 뒤로 미룬다. 완전히 배제하지 않는 이유는 후보 풀이
     # 작을 때 일차가 비는 것을 막기 위해서다.
     unused_first = [c for c in ranked if c.id not in already_used]

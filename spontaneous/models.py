@@ -53,8 +53,13 @@ class SpontaneousCourseStop(BaseModel):
     role: str
     name: str
     contentId: str | None = None
+    contentTypeId: str | None = None
     latitude: float
     longitude: float
+    travelMinutesFromPrevious: int | None = None
+    arrivalAt: datetime | None = None
+    departureAt: datetime | None = None
+    returnTravelMinutes: int | None = None
     inboundMinutes: int | None = None
     arriveAt: datetime | None = None
     departAt: datetime | None = None
@@ -67,9 +72,13 @@ class SpontaneousCourseResponse(BaseModel):
     destinationId: str
     name: str
     transportMode: TransportMode
-    transport: TransportOption
+    transport: TransportOption | None = None
+    returnTravelMinutes: int | None = None
     finalReturnMinutes: int | None = None
+    estimatedReturnAt: datetime | None = None
     expectedReturnAt: datetime | None = None
+    returnBy: datetime | None = None
+    candidateCounts: dict[str, int] = Field(default_factory=dict)
     course: list[SpontaneousCourseStop] = Field(default_factory=list)
 
 

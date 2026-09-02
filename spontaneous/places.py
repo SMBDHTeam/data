@@ -1,10 +1,11 @@
 import json
 import os
+import re
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
 from spontaneous.destinations import DestinationZone
-
+from datetime import datetime, time
 
 TOUR_API_BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
 
@@ -20,13 +21,42 @@ COURSE_CONTENT_TYPE_IDS = {
 }
 
 
+def parse_optional_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def has_valid_coordinates(
+    place: dict,
+) -> bool:
+    latitude = parse_optional_float(
+        place.get("mapy")
+    )
+    longitude = parse_optional_float(
+        place.get("mapx")
+    )
+
+    if latitude is None or longitude is None:
+        return False
+
+    return (
+        -90 <= latitude <= 90
+        and -180 <= longitude <= 180
+    )
+
+
 def filter_course_places(
     places: list[dict],
 ) -> list[dict]:
     return [
         place
         for place in places
-        if str(place.get("contenttypeid")) in COURSE_CONTENT_TYPE_IDS
+        if (
+            str(place.get("contenttypeid")) in COURSE_CONTENT_TYPE_IDS
+            and has_valid_coordinates(place)
+        )
     ]
 
 
@@ -297,17 +327,22 @@ def convert_to_course_place(
         themes,
     )
 
+    latitude = parse_optional_float(
+        place.get("mapy")
+    )
+    longitude = parse_optional_float(
+        place.get("mapx")
+    )
+
     return {
         "name": place.get("title"),
         "contentId": place.get("contentid"),
-
-        "latitude": float(
-            place.get("mapy", 0)
+        "contentTypeId": str(
+            place.get("contenttypeid", "")
         ),
 
-        "longitude": float(
-            place.get("mapx", 0)
-        ),
+        "latitude": latitude,
+        "longitude": longitude,
 
         "themes": themes,
 
@@ -317,4 +352,182 @@ def convert_to_course_place(
 def filter_course_candidates(
     places: list[dict],
 ) -> list[dict]:
-    return filter_course_places(places)
+    return [
+        place
+        for place in places
+        if (
+            str(place.get("contenttypeid"))
+            in COURSE_CONTENT_TYPE_IDS
+            and has_valid_coordinates(place)
+        )
+    ]
+
+
+def parse_open_time(
+    open_time_text: str,
+) -> tuple[time, time] | None:
+    """
+    TourAPI 영업시간 문자열 파싱
+
+    예:
+    11:30~22:00
+
+    결과:
+    (11:30,22:00)
+    """
+
+    if not open_time_text:
+        return None
+
+
+    text = (
+        open_time_text
+        .replace("<br>", " ")
+        .replace("<br/>", " ")
+        .replace("<br />", " ")
+        .strip()
+    )
+
+    matches = re.findall(
+        r"([0-2]?\d):([0-5]\d)",
+        text,
+    )
+
+    if len(matches) < 2:
+        return None
+
+    def to_time(match: tuple[str, str]) -> time | None:
+        hour = int(match[0])
+        minute = int(match[1])
+
+        if hour == 24 and minute == 0:
+            return time(23, 59)
+
+        if hour > 23:
+            return None
+
+        return time(hour, minute)
+
+    start = to_time(matches[0])
+    end = to_time(matches[1])
+
+    if start is None or end is None:
+        return None
+
+    return (
+        start,
+        end
+    )
+
+def is_open_now(
+    open_time_text: str,
+    current_time: datetime,
+) -> bool:
+    """
+    현재 시간 영업 여부
+    """
+
+    parsed = parse_open_time(
+        open_time_text
+    )
+
+    if not parsed:
+        # 정보 없으면 일단 허용
+        return True
+
+
+    start, end = parsed
+
+
+    now = current_time.time()
+
+    if start <= end:
+        return (
+            start <= now <= end
+        )
+
+    return (
+        now >= start
+        or now <= end
+    )
+
+
+def is_food_open(
+    place: dict,
+    current_time: datetime,
+) -> bool:
+
+    if str(
+        place.get("contenttypeid")
+    ) != "39":
+        return True
+
+
+    detail = search_food_detail(
+        place.get("contentid")
+    )
+
+
+    open_time = detail.get(
+        "opentimefood",
+        ""
+    )
+
+
+    return is_open_now(
+        open_time,
+        current_time,
+    )
+
+
+def filter_open_places(
+    places: list[dict],
+    current_datetime: datetime,
+) -> list[dict]:
+    """
+    현재 영업 가능한 장소만 반환
+    """
+
+    result = []
+
+    for place in places:
+
+        if is_food_open(
+            place,
+            current_datetime,
+        ):
+            result.append(place)
+
+    return result
+
+
+def is_course_place_open_for_visit(
+    place: dict,
+    arrival_at: datetime,
+    departure_at: datetime,
+) -> bool:
+    if str(
+        place.get("contentTypeId")
+    ) != "39":
+        return True
+
+    content_id = place.get(
+        "contentId"
+    )
+
+    if not content_id:
+        return True
+
+    detail = search_food_detail(
+        content_id
+    )
+
+    open_time = detail.get(
+        "opentimefood",
+        ""
+    )
+
+    return (
+        is_open_now(open_time, arrival_at)
+        and is_open_now(open_time, departure_at)
+    )

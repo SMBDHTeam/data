@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import timedelta
+from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -51,9 +51,13 @@ from spontaneous.models import (
     SpontaneousCourseResponse,
     SpontaneousDestinationRequest,
     SpontaneousDestinationResponse,
+    TransportMode,
 )
 
-from spontaneous.destinations import DESTINATION_ZONES
+from spontaneous.destinations import (
+    DESTINATION_ZONES,
+    find_destination_zone,
+)
 
 from spontaneous.service import (
     calculate_destination_score,
@@ -64,15 +68,26 @@ from spontaneous.routing import (
     get_transport_options,
     get_best_travel_minutes,
     get_best_stay_minutes,
-    get_travel_minutes_for_mode,
 )
-from spontaneous.destinations import find_destination_zone
+
 from spontaneous.places import (
-    convert_to_course_place,
-    filter_course_candidates,
     search_places_by_zone,
+    filter_course_candidates,
+    filter_open_places,
+    convert_to_course_place,
+    is_course_place_open_for_visit,
 )
-from spontaneous.course import generate_course, group_places_by_role
+
+from spontaneous.course import (
+    group_places_by_role,
+    generate_course,
+    calculate_course_travel_minutes,
+    apply_course_timeline,
+    has_complete_travel_minutes,
+    normalize_course_orders,
+    public_course_stop,
+)
+# -------
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"
@@ -653,6 +668,19 @@ def create_spontaneous_course(
     request: SpontaneousCourseRequest,
 ) -> SpontaneousCourseResponse:
     started_at = monotonic()
+
+    if request.returnBy <= request.startAt:
+        raise HTTPException(
+            status_code=422,
+            detail="COURSE_NOT_FEASIBLE",
+        )
+
+    if request.transportMode == TransportMode.BICYCLE:
+        raise HTTPException(
+            status_code=422,
+            detail="UNSUPPORTED_TRANSPORT_MODE",
+        )
+
     zone = find_destination_zone(
         request.destinationId
     )
@@ -663,148 +691,165 @@ def create_spontaneous_course(
             detail="DESTINATION_NOT_FOUND",
         )
 
-    destination = Coordinate(
-        latitude=zone.center_latitude,
-        longitude=zone.center_longitude,
-    )
-
-    transport_options = get_transport_options(
-        request.currentLocation,
-        destination,
-        request.startAt,
-        request.returnBy,
-    )
-    selected_transport = next(
-        (option for option in transport_options if option.mode == request.transportMode),
-        None,
-    )
-
-    if selected_transport is None or not selected_transport.available:
-        raise HTTPException(
-            status_code=400,
-            detail="TRANSPORT_MODE_UNAVAILABLE",
-        )
-
+    # 1. 목적지 장소 조회
     try:
-        raw_places = search_places_by_zone(zone)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        log.exception("spontaneous course place search failed. destinationId=%s", request.destinationId)
-        raise HTTPException(status_code=502, detail="PLACE_SEARCH_FAILED") from exc
-
-    course_candidates = filter_course_candidates(raw_places)
-    if not course_candidates:
-        raise HTTPException(status_code=404, detail="COURSE_CANDIDATES_NOT_FOUND")
-
-    converted_places = [convert_to_course_place(place) for place in course_candidates]
-    grouped_places = group_places_by_role(converted_places)
-    generated_course = generate_course(
-        grouped_places,
-        {theme.upper() for theme in request.desiredThemes},
-        {
-            "latitude": request.currentLocation.latitude,
-            "longitude": request.currentLocation.longitude,
-        },
-    )
-    if not generated_course:
-        raise HTTPException(status_code=404, detail="COURSE_GENERATION_EMPTY")
-    timed_course = add_spontaneous_course_timeline(
-        request,
-        generated_course,
-    )
-    final_return_minutes, expected_return_at = calculate_spontaneous_return_timeline(
-        request,
-        timed_course,
-    )
-
-    log.info(
-        "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, returnMinutes=%s, elapsedMs=%d",
-        request.destinationId,
-        request.transportMode,
-        len(timed_course),
-        final_return_minutes,
-        int((monotonic() - started_at) * 1000),
-    )
-
-    return SpontaneousCourseResponse(
-        destinationId=zone.destination_id,
-        name=zone.name,
-        transportMode=request.transportMode,
-        transport=selected_transport,
-        finalReturnMinutes=final_return_minutes,
-        expectedReturnAt=expected_return_at,
-        course=timed_course,
-    )
-
-
-def add_spontaneous_course_timeline(
-    request: SpontaneousCourseRequest,
-    course: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    timed: list[dict[str, Any]] = []
-    cursor = request.startAt
-    current_location = request.currentLocation
-
-    for stop in course:
-        stop_location = Coordinate(
-            latitude=float(stop["latitude"]),
-            longitude=float(stop["longitude"]),
+        places = search_places_by_zone(
+            zone
         )
-        inbound_minutes = get_travel_minutes_for_mode(
-            current_location,
-            stop_location,
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="TOUR_API_ERROR",
+        ) from exc
+
+    before_count = len(places)
+
+
+    # 2. 코스 가능한 장소만
+    places = filter_course_candidates(
+        places
+    )
+
+
+    # 3. 운영시간 필터
+    places = filter_open_places(
+        places,
+        request.startAt,
+    )
+
+    after_count = len(places)
+
+
+    if not places:
+        raise HTTPException(
+            status_code=422,
+            detail="COURSE_NOT_FEASIBLE",
+        )
+
+    course_places = [
+        convert_to_course_place(place)
+        for place in places
+    ]
+
+
+    grouped_places = group_places_by_role(
+        course_places
+    )
+
+
+    course = generate_course(
+        grouped_places,
+        set(request.desiredThemes),
+        request.currentLocation,
+    )
+
+    if not course:
+        raise HTTPException(
+            status_code=422,
+            detail="COURSE_NOT_FEASIBLE",
+        )
+
+    while course:
+        course = calculate_course_travel_minutes(
+            course,
+            request.currentLocation,
             request.transportMode,
         )
-        if inbound_minutes is None:
+
+        if not has_complete_travel_minutes(
+            course
+        ):
             raise HTTPException(
-                status_code=400,
-                detail="COURSE_SEGMENT_ROUTE_UNAVAILABLE",
+                status_code=422,
+                detail="NO_ROUTE",
             )
-        arrive_at = cursor + timedelta(minutes=inbound_minutes)
-        depart_at = arrive_at + timedelta(minutes=int(stop["stayMinutes"]))
 
-        timed.append(
-            {
-                **stop,
-                "inboundMinutes": inbound_minutes,
-                "arriveAt": arrive_at,
-                "departAt": depart_at,
+        try:
+            timeline = apply_course_timeline(
+                course,
+                request.startAt,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=str(exc),
+            ) from exc
+
+        invalid_stop_index = None
+
+        for index, stop in enumerate(
+            timeline["course"]
+        ):
+            arrival_at = datetime.fromisoformat(
+                stop["arrivalAt"]
+            )
+            departure_at = datetime.fromisoformat(
+                stop["departureAt"]
+            )
+
+            if not is_course_place_open_for_visit(
+                stop,
+                arrival_at,
+                departure_at,
+            ):
+                invalid_stop_index = index
+                break
+
+        if invalid_stop_index is not None:
+            course = normalize_course_orders(
+                course[:invalid_stop_index]
+                + course[invalid_stop_index + 1:]
+            )
+            continue
+
+        estimated_return_at = timeline[
+            "estimatedReturnAt"
+        ]
+
+        if estimated_return_at <= request.returnBy:
+            log.info(
+                "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, returnMinutes=%s, elapsedMs=%d",
+                request.destinationId,
+                request.transportMode,
+                len(timeline["course"]),
+                timeline["returnTravelMinutes"],
+                int((monotonic() - started_at) * 1000),
+            )
+
+            return {
+                "destinationId": zone.destination_id,
+                "name": zone.name,
+                "transportMode": request.transportMode.value,
+                "course": [
+                    public_course_stop(stop)
+                    for stop in timeline["course"]
+                ],
+                "returnTravelMinutes": timeline[
+                    "returnTravelMinutes"
+                ],
+                "finalReturnMinutes": timeline[
+                    "returnTravelMinutes"
+                ],
+                "estimatedReturnAt": estimated_return_at.isoformat(),
+                "expectedReturnAt": estimated_return_at.isoformat(),
+                "returnBy": request.returnBy.isoformat(),
+                "candidateCounts": {
+                    "searched": before_count,
+                    "open": after_count,
+                },
             }
+
+        course = normalize_course_orders(
+            course[:-1]
         )
 
-        cursor = depart_at
-        current_location = stop_location
-
-    return timed
-
-
-def calculate_spontaneous_return_timeline(
-    request: SpontaneousCourseRequest,
-    course: list[dict[str, Any]],
-) -> tuple[int | None, Any]:
-    if not course:
-        return None, None
-
-    last_stop = course[-1]
-    last_location = Coordinate(
-        latitude=float(last_stop["latitude"]),
-        longitude=float(last_stop["longitude"]),
+    raise HTTPException(
+        status_code=422,
+        detail="COURSE_NOT_FEASIBLE",
     )
-    return_minutes = get_travel_minutes_for_mode(
-        last_location,
-        request.currentLocation,
-        request.transportMode,
-    )
-    if return_minutes is None:
-        raise HTTPException(
-            status_code=400,
-            detail="COURSE_RETURN_ROUTE_UNAVAILABLE",
-        )
-
-    depart_at = last_stop.get("departAt")
-    if depart_at is None:
-        return return_minutes, None
-
-    expected_return_at = depart_at + timedelta(minutes=return_minutes)
-    return return_minutes, expected_return_at
+# -------

@@ -53,7 +53,10 @@ def filter_course_places(
     return [
         place
         for place in places
-        if str(place.get("contenttypeid")) in COURSE_CONTENT_TYPE_IDS
+        if (
+            str(place.get("contenttypeid")) in COURSE_CONTENT_TYPE_IDS
+            and has_valid_coordinates(place)
+        )
     ]
 
 
@@ -174,40 +177,6 @@ def infer_place_themes(
 
     return themes
 
-
-def infer_food_themes(
-    detail: dict,
-) -> set[str]:
-    themes: set[str] = set()
-
-    text = " ".join(
-        [
-            str(detail.get("firstmenu", "")),
-            str(detail.get("treatmenu", "")),
-        ]
-    ).upper()
-
-    seafood_keywords = [
-        "회",
-        "생선",
-        "우럭",
-        "광어",
-        "연어",
-        "참치",
-        "해산물",
-        "수산",
-        "조개",
-        "전복",
-        "장어",
-    ]
-
-    if any(
-        keyword.upper() in text
-        for keyword in seafood_keywords
-    ):
-        themes.add("SEAFOOD")
-
-    return themes
 
 def filter_places_by_themes(
     places: list[dict],
@@ -380,26 +349,15 @@ def convert_to_course_place(
         "raw": place,
     }
 
-COURSE_CONTENT_TYPES = {
-    "12", # 관광지
-    "14", # 문화시설
-    "15", # 축제공연
-    "28", # 레포츠
-    "38", # 쇼핑
-    "39", # 음식
-}
-
-
 def filter_course_candidates(
     places: list[dict],
 ) -> list[dict]:
-    
     return [
         place
         for place in places
         if (
             str(place.get("contenttypeid"))
-            in COURSE_CONTENT_TYPES
+            in COURSE_CONTENT_TYPE_IDS
             and has_valid_coordinates(place)
         )
     ]

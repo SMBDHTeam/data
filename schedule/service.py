@@ -5,18 +5,21 @@ import logging
 import re
 import os
 from collections import defaultdict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
 from core.runtime_env import load_runtime_env
-from place.place_experience import classify_place
+from place.place_experience import ExperienceProfile, classify_place
 from schedule.models import (
     DayLocation,
     MapMarker,
@@ -56,6 +59,11 @@ CANDIDATE_PLACES_PATH = BASE_DIR / "candidate_places.json"
 DEFAULT_STAY_MINUTES = 90
 MIN_STAY_MINUTES = 30
 MAX_STOPS_PER_DAY = 5
+EARLY_FINISH_BUFFER_MINUTES = 180
+MIN_DAY_UTILIZATION_RATIO = 0.7
+TARGET_DAY_UNUSED_BUFFER_MINUTES = 90
+TARGET_DAY_UTILIZATION_RATIO = 0.85
+CANDIDATE_POOL_TTL_SECONDS = max(5, int(os.getenv("SCHEDULE_CANDIDATE_POOL_TTL_SECONDS", "60")))
 
 THEME_PLACEHOLDER_NAMES = {
     "THEME_FOOD": ["로컬 맛집", "시장 먹거리", "바다뷰 카페", "디저트 스팟", "해산물 식당"],
@@ -141,6 +149,24 @@ class FixedEventSpec:
     ends_at: datetime
 
 
+RouteCacheKey = tuple[str, str, str, str, str]
+ROUTE_CACHE: ContextVar[dict[RouteCacheKey, ScheduleTransit] | None] = ContextVar("schedule_route_cache", default=None)
+PlaceProfileCacheKey = tuple[int, str, str]
+PLACE_PROFILE_CACHE: ContextVar[dict[PlaceProfileCacheKey, ExperienceProfile] | None] = ContextVar(
+    "schedule_place_profile_cache",
+    default=None,
+)
+CandidateRankCacheKey = tuple[int, int, str, str, str, str, str, str, bool, bool, bool, bool]
+CANDIDATE_RANK_CACHE: ContextVar[dict[CandidateRankCacheKey, tuple[float, int, int, int, int, float]] | None] = ContextVar(
+    "schedule_candidate_rank_cache",
+    default=None,
+)
+PLACE_LOOKUP_CACHE: ContextVar[dict[int, CandidatePlace] | None] = ContextVar(
+    "schedule_place_lookup_cache",
+    default=None,
+)
+
+
 DEFAULT_CANDIDATES = [
     CandidatePlace(1, "GAMCHEON", "14", "감천문화마을", "문화시설", "부산 사하구 감내2로 203", Decimal("129.0106"), Decimal("35.0974")),
     CandidatePlace(2, "SONGDO_BEACH", "12", "송도해수욕장", "관광지", "부산 서구 송도해변로 100", Decimal("129.0172"), Decimal("35.0770")),
@@ -201,6 +227,9 @@ CANDIDATE_SELECT = """
         WHERE name IS NOT NULL
           AND longitude IS NOT NULL
           AND latitude IS NOT NULL
+          -- 관리자가 가린 장소는 일정 후보에서 뺀다. Spring 쪽 검색에서도 빠지므로
+          -- 사용자가 새로 고를 수 없지만, 이미 만들어 둔 Preview 가 참조할 수는 있다.
+          AND hidden_at IS NULL
 """
 
 
@@ -263,6 +292,31 @@ def load_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidatePla
         return None
 
     return {candidate.id: candidate for candidate in rows_to_candidates(rows)}
+
+
+def cached_candidate_places_by_ids(place_ids: list[int]) -> dict[int, CandidatePlace] | None:
+    unique_ids = dedupe_ints(place_ids)
+    if not unique_ids:
+        return {}
+    cache = PLACE_LOOKUP_CACHE.get()
+    if cache is None:
+        return load_candidate_places_by_ids(unique_ids)
+
+    missing_ids = [place_id for place_id in unique_ids if place_id not in cache]
+    if missing_ids:
+        loaded = load_candidate_places_by_ids(missing_ids)
+        if loaded is None:
+            return None
+        for place_id in missing_ids:
+            candidate = loaded.get(place_id)
+            if candidate is not None:
+                cache[place_id] = candidate
+
+    return {place_id: cache[place_id] for place_id in unique_ids if place_id in cache}
+
+
+def warm_candidate_place_cache(place_ids: list[int]) -> None:
+    cached_candidate_places_by_ids(place_ids)
 
 
 def db_runtime_status() -> dict[str, str | bool | None]:
@@ -350,14 +404,47 @@ def load_candidate_places() -> tuple[list[CandidatePlace], str]:
         return DEFAULT_CANDIDATES, "built_in_default"
 
 
-CANDIDATE_POOL, CANDIDATE_POOL_SOURCE = load_candidate_places()
+_candidate_pool_lock = Lock()
+CANDIDATE_POOL: list[CandidatePlace] = []
+CANDIDATE_POOL_SOURCE = "uninitialized"
+_candidate_pool_loaded_at = 0.0
 
-if CANDIDATE_POOL_SOURCE != "database":
-    log.warning(
-        "schedule candidate pool is not backed by the database. source=%s count=%s. "
-        "일정 품질이 크게 떨어진다. SPRING_DATASOURCE_* 환경변수를 확인할 것.",
-        CANDIDATE_POOL_SOURCE, len(CANDIDATE_POOL),
-    )
+
+def _refresh_candidate_pool(force: bool = False) -> tuple[list[CandidatePlace], str]:
+    global CANDIDATE_POOL, CANDIDATE_POOL_SOURCE, _candidate_pool_loaded_at
+    now = monotonic()
+    with _candidate_pool_lock:
+        if (
+            not force
+            and CANDIDATE_POOL
+            and now - _candidate_pool_loaded_at < CANDIDATE_POOL_TTL_SECONDS
+        ):
+            return CANDIDATE_POOL, CANDIDATE_POOL_SOURCE
+
+        pool, source = load_candidate_places()
+        CANDIDATE_POOL = pool
+        CANDIDATE_POOL_SOURCE = source
+        _candidate_pool_loaded_at = now
+
+        if source != "database":
+            log.warning(
+                "schedule candidate pool is not backed by the database. source=%s count=%s. "
+                "일정 품질이 크게 떨어진다. SPRING_DATASOURCE_* 환경변수를 확인할 것.",
+                source,
+                len(pool),
+            )
+        return CANDIDATE_POOL, CANDIDATE_POOL_SOURCE
+
+
+def current_candidate_pool(force_refresh: bool = False) -> list[CandidatePlace]:
+    return _refresh_candidate_pool(force_refresh)[0]
+
+
+def current_candidate_pool_source(force_refresh: bool = False) -> str:
+    return _refresh_candidate_pool(force_refresh)[1]
+
+
+_refresh_candidate_pool(force=True)
 
 
 class ScheduleStore:
@@ -394,93 +481,113 @@ def create_schedule(
     request: ScheduleCreateRequest,
     preview_id: UUID | None = None,
     fixed_events_by_day: dict[int, list[FixedEventSpec]] | None = None,
+    owner_id: int | None = None,
 ) -> ScheduleResponse:
-    log.info(
-        "schedule build started. previewId=%s, startDate=%s, endDate=%s, candidateSource=%s",
-        preview_id,
-        request.start_date,
-        request.end_date,
-        CANDIDATE_POOL_SOURCE,
-    )
-    planned_days = plan_days(request)
-    places_by_day = distribute_must_visit_places(planned_days, request.must_visit_place_ids)
-    target_counts = target_stop_counts(planned_days, request)
-    days: list[ScheduleDay] = []
-    # 앞선 일차에서 쓴 장소를 누적해 다음 일차가 같은 곳을 다시 고르지 않게 한다.
-    used_place_ids: set[int] = set()
-    for planned_day in planned_days:
-        day_place_ids = places_by_day.get(planned_day.day_no, [])
-        target_count = max(len(day_place_ids), target_counts.get(planned_day.day_no, 1))
-        stops = build_stops(
-            planned_day,
-            day_place_ids,
-            target_count,
-            request,
-            fixed_events_by_day.get(planned_day.day_no, []) if fixed_events_by_day else [],
-            used_place_ids,
-        )
-        used_place_ids.update(
-            stop.place.id for stop in stops if stop.place is not None and stop.place.id is not None
-        )
-        days.append(
-            ScheduleDay(
-                dayNo=planned_day.day_no,
-                date=planned_day.date,
-                startTime=planned_day.start_time,
-                endTime=planned_day.end_time,
-                startLocation=to_day_location(planned_day.start_location),
-                endLocation=to_day_location(planned_day.end_location),
-                startLocationSource="REQUEST",
-                endLocationSource="REQUEST",
-                summary=build_day_summary(planned_day, stops),
-                stops=stops,
-                finalTransit=build_final_transit(planned_day, stops),
+    with schedule_route_cache_scope():
+        prefetch_place_ids = list(request.must_visit_place_ids)
+        if fixed_events_by_day:
+            prefetch_place_ids.extend(
+                event.place_id
+                for events in fixed_events_by_day.values()
+                for event in events
             )
+        warm_candidate_place_cache(prefetch_place_ids)
+        candidate_source = current_candidate_pool_source()
+        log.info(
+            "schedule build started. previewId=%s, startDate=%s, endDate=%s, candidateSource=%s",
+            preview_id,
+            request.start_date,
+            request.end_date,
+            candidate_source,
         )
-
-    days, repair_warnings = repair_schedule_days(planned_days, days, target_counts)
-
-    schedule = ScheduleResponse(
-        id=uuid4(),
-        status="DRAFT",
-        startDate=request.start_date,
-        endDate=request.end_date,
-        dailyStartTime=request.daily_start_time,
-        dailyEndTime=request.daily_end_time,
-        styleSummary=build_style_summary(request),
-        days=days,
-        evaluation=None,
-        previewId=preview_id,
-        planningAssumptions=PlanningAssumptions(
-            routeCoverage=resolve_route_coverage(days),
-            warnings=dedupe_warnings(
-                DEFAULT_PLANNING_WARNINGS
-                + (["고정 일정 시간을 반영해 일부 방문 순서를 조정했습니다."] if fixed_events_by_day else [])
-                + repair_warnings
+        planned_days = plan_days(request)
+        places_by_day = distribute_must_visit_places(planned_days, request.must_visit_place_ids)
+        target_counts = target_stop_counts(planned_days, request)
+        days: list[ScheduleDay] = []
+        # 앞선 일차에서 쓴 장소를 누적해 다음 일차가 같은 곳을 다시 고르지 않게 한다.
+        used_place_ids: set[int] = set()
+        for planned_day in planned_days:
+            day_place_ids = places_by_day.get(planned_day.day_no, [])
+            target_count = max(len(day_place_ids), target_counts.get(planned_day.day_no, 1))
+            stops = build_stops(
+                planned_day,
+                day_place_ids,
+                target_count,
+                request,
+                fixed_events_by_day.get(planned_day.day_no, []) if fixed_events_by_day else [],
+                used_place_ids,
             )
-        ),
-    )
-    saved = STORE.save(schedule)
+            used_place_ids.update(
+                stop.place.id for stop in stops if stop.place is not None and stop.place.id is not None
+            )
+            days.append(
+                ScheduleDay(
+                    dayNo=planned_day.day_no,
+                    date=planned_day.date,
+                    startTime=planned_day.start_time,
+                    endTime=planned_day.end_time,
+                    startLocation=to_day_location(planned_day.start_location),
+                    endLocation=to_day_location(planned_day.end_location),
+                    startLocationSource="REQUEST",
+                    endLocationSource="REQUEST",
+                    summary=build_day_summary(planned_day, stops),
+                    stops=stops,
+                    finalTransit=build_final_transit(planned_day, stops),
+                )
+            )
+
+        days, repair_warnings = repair_schedule_days(planned_days, days, target_counts, request)
+
+        schedule = ScheduleResponse(
+            id=uuid4(),
+            status="DRAFT",
+            startDate=request.start_date,
+            endDate=request.end_date,
+            dailyStartTime=request.daily_start_time,
+            dailyEndTime=request.daily_end_time,
+            styleSummary=build_style_summary(request),
+            days=days,
+            evaluation=None,
+            previewId=preview_id,
+            planningAssumptions=PlanningAssumptions(
+                routeCoverage=resolve_route_coverage(days),
+                warnings=dedupe_warnings(
+                    DEFAULT_PLANNING_WARNINGS
+                    + (["고정 일정 시간을 반영해 일부 방문 순서를 조정했습니다."] if fixed_events_by_day else [])
+                    + repair_warnings
+                )
+            ),
+        )
+        saved = STORE.save(schedule)
+        if db_enabled():
+            try:
+                save_schedule_to_db(saved, condition_request=request, owner_id=owner_id)
+            except Exception:
+                log.exception("schedule persistence failed. scheduleId=%s", saved.id)
+        log.info(
+            "schedule build finished. scheduleId=%s, days=%s, routeCoverage=%s",
+            saved.id,
+            len(saved.days),
+            saved.planning_assumptions.route_coverage if saved.planning_assumptions else None,
+        )
+        return saved
+
+
+def list_schedules(user_id: int | None = None) -> ScheduleListResponse:
+    """일정 목록. user_id 가 있으면 그 사용자의 일정만 준다.
+
+    DB 가 켜진 운영 경로에서는 조회 실패를 메모리 저장소로 숨기지 않는다.
+    목록 API 는 소유자 필터가 중요하므로, 조용히 fallback 하면 다른 사용자 데이터가
+    섞여 보일 위험이 있다.
+
+    DB 가 아예 없는 로컬 실행에서만 메모리 저장소를 쓴다.
+    """
     if db_enabled():
         try:
-            save_schedule_to_db(saved, condition_request=request)
+            return list_schedules_from_db(user_id)
         except Exception:
-            log.exception("schedule persistence failed. scheduleId=%s", saved.id)
-    log.info(
-        "schedule build finished. scheduleId=%s, days=%s, routeCoverage=%s",
-        saved.id,
-        len(saved.days),
-        saved.planning_assumptions.route_coverage if saved.planning_assumptions else None,
-    )
-    return saved
-
-
-def list_schedules() -> ScheduleListResponse:
-    if db_enabled():
-        try:
-            return list_schedules_from_db()
-        except Exception:
-            log.exception("schedule list db load failed. falling back to memory store")
+            log.exception("schedule list db load failed. userId=%s", user_id)
+            raise HTTPException(status_code=503, detail="Schedule list unavailable")
     return STORE.list()
 
 
@@ -497,66 +604,74 @@ def get_schedule(schedule_id: UUID) -> ScheduleResponse:
 
 
 def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> ScheduleResponse:
-    existing = get_schedule(schedule_id)
-    days_by_no = {day.day_no: day.model_copy(deep=True) for day in existing.days}
-    existing_stop_index = {
-        stop.id: (day.day_no, stop)
-        for day in existing.days
-        for stop in day.stops
-    }
+    with schedule_route_cache_scope():
+        warm_candidate_place_cache(
+            [
+                patch_stop.place_id
+                for patch_stop in request.stops
+                if patch_stop.stop_id is None and patch_stop.place_id is not None
+            ]
+        )
+        existing = get_schedule(schedule_id)
+        days_by_no = {day.day_no: day.model_copy(deep=True) for day in existing.days}
+        existing_stop_index = {
+            stop.id: (day.day_no, stop)
+            for day in existing.days
+            for stop in day.stops
+        }
 
-    grouped_stops: dict[int, list[ScheduleStop]] = defaultdict(list)
-    for patch_stop in request.stops:
-        if patch_stop.day_no not in days_by_no:
-            raise HTTPException(status_code=400, detail=f"dayNo {patch_stop.day_no} does not exist")
-        if patch_stop.stop_id is not None:
-            original = existing_stop_index.get(patch_stop.stop_id)
-            if original is None:
-                raise HTTPException(status_code=404, detail=f"stopId {patch_stop.stop_id} not found")
-            _, existing_stop = original
-            updated_stop = existing_stop.model_copy(deep=True)
-            updated_stop.order = patch_stop.order
-            updated_stop.stay_minutes = patch_stop.stay_minutes
-            updated_stop.arrive_at = None
-            updated_stop.depart_at = None
-            updated_stop.warnings = dedupe_warnings(
-                updated_stop.warnings + ["방문 순서 변경에 따라 도착 및 출발 시간이 다시 계산되었습니다."]
+        grouped_stops: dict[int, list[ScheduleStop]] = defaultdict(list)
+        for patch_stop in request.stops:
+            if patch_stop.day_no not in days_by_no:
+                raise HTTPException(status_code=400, detail=f"dayNo {patch_stop.day_no} does not exist")
+            if patch_stop.stop_id is not None:
+                original = existing_stop_index.get(patch_stop.stop_id)
+                if original is None:
+                    raise HTTPException(status_code=404, detail=f"stopId {patch_stop.stop_id} not found")
+                _, existing_stop = original
+                updated_stop = existing_stop.model_copy(deep=True)
+                updated_stop.order = patch_stop.order
+                updated_stop.stay_minutes = patch_stop.stay_minutes
+                updated_stop.arrive_at = None
+                updated_stop.depart_at = None
+                updated_stop.warnings = dedupe_warnings(
+                    updated_stop.warnings + ["방문 순서 변경에 따라 도착 및 출발 시간이 다시 계산되었습니다."]
+                )
+                grouped_stops[patch_stop.day_no].append(updated_stop)
+                continue
+
+            grouped_stops[patch_stop.day_no].append(
+                candidate_stop(
+                    order=patch_stop.order,
+                    stay_minutes=patch_stop.stay_minutes,
+                    candidate=resolve_place_or_400(patch_stop.place_id),
+                    selection_reasons=["update_requested_place"],
+                )
             )
-            grouped_stops[patch_stop.day_no].append(updated_stop)
-            continue
 
-        grouped_stops[patch_stop.day_no].append(
-            candidate_stop(
-                order=patch_stop.order,
-                stay_minutes=patch_stop.stay_minutes,
-                candidate=resolve_place_or_400(patch_stop.place_id),
-                selection_reasons=["update_requested_place"],
+        updated_days: list[ScheduleDay] = []
+        for day_no, day in sorted(days_by_no.items()):
+            day_stops = sorted(grouped_stops.get(day_no, day.stops), key=lambda stop: stop.order)
+            recalculated = recalculate_day(day, day_stops)
+            recalculated.final_transit = build_final_transit(planned_day_from_schedule_day(recalculated), recalculated.stops)
+            updated_days.append(recalculated)
+
+        updated_schedule = existing.model_copy(deep=True)
+        updated_schedule.days = updated_days
+        updated_schedule.planning_assumptions = PlanningAssumptions(
+            routeCoverage=resolve_route_coverage(updated_days),
+            warnings=dedupe_warnings(
+                DEFAULT_PLANNING_WARNINGS + ["일정 수정 내용을 반영해 이동 시간과 방문 순서를 다시 계산했습니다."]
             )
         )
-
-    updated_days: list[ScheduleDay] = []
-    for day_no, day in sorted(days_by_no.items()):
-        day_stops = sorted(grouped_stops.get(day_no, day.stops), key=lambda stop: stop.order)
-        recalculated = recalculate_day(day, day_stops)
-        recalculated.final_transit = build_final_transit(planned_day_from_schedule_day(recalculated), recalculated.stops)
-        updated_days.append(recalculated)
-
-    updated_schedule = existing.model_copy(deep=True)
-    updated_schedule.days = updated_days
-    updated_schedule.planning_assumptions = PlanningAssumptions(
-        routeCoverage=resolve_route_coverage(updated_days),
-        warnings=dedupe_warnings(
-            DEFAULT_PLANNING_WARNINGS + ["일정 수정 내용을 반영해 이동 시간과 방문 순서를 다시 계산했습니다."]
-        )
-    )
-    saved = STORE.save(updated_schedule)
-    if db_enabled():
-        try:
-            save_schedule_to_db(saved, condition_request=request_context_from_schedule(saved))
-        except Exception:
-            log.exception("schedule update persistence failed. scheduleId=%s", saved.id)
-    log.info("schedule updated. scheduleId=%s, days=%s", saved.id, len(saved.days))
-    return saved
+        saved = STORE.save(updated_schedule)
+        if db_enabled():
+            try:
+                save_schedule_to_db(saved, condition_request=request_context_from_schedule(saved))
+            except Exception:
+                log.exception("schedule update persistence failed. scheduleId=%s", saved.id)
+        log.info("schedule updated. scheduleId=%s, days=%s", saved.id, len(saved.days))
+        return saved
 
 
 def get_schedule_map(schedule_id: UUID, day_no: int | None) -> ScheduleMapResponse:
@@ -742,17 +857,18 @@ def build_stops(
             if depart_dt <= cursor:
                 depart_dt = min(end_dt, cursor + timedelta(minutes=MIN_STAY_MINUTES))
             arrive_dt = cursor
+        stop_selection_reasons = selection_reasons(
+            candidate.id if candidate.id in must_visit_ids else None,
+            theme_answer_id,
+            request,
+            fixed_event is not None,
+        )
         stops.append(
             candidate_stop(
                 order=index,
                 stay_minutes=max(MIN_STAY_MINUTES, int((depart_dt - arrive_dt).total_seconds() // 60)),
                 candidate=candidate,
-                selection_reasons=selection_reasons(
-                    candidate.id if candidate.id in must_visit_ids else None,
-                    theme_answer_id,
-                    request,
-                    fixed_event is not None,
-                ),
+                selection_reasons=stop_selection_reasons,
                 arrive_at=arrive_dt.time(),
                 depart_at=depart_dt.time(),
                 inbound_transit=inbound_transit,
@@ -1077,6 +1193,20 @@ def visit_duration_minutes(candidate: CandidatePlace) -> int:
     return 60
 
 
+def max_visit_duration_minutes(candidate: CandidatePlace) -> int:
+    if candidate.content_type_id == "15":
+        return 120
+    if candidate.content_type_id == "39":
+        return 105
+    if candidate.content_type_id == "14":
+        return 120
+    if candidate.content_type_id == "28":
+        return 105
+    if candidate.content_type_id == "38":
+        return 90
+    return 120
+
+
 def estimate_transit_minutes(
     start_lon: Decimal,
     start_lat: Decimal,
@@ -1171,14 +1301,141 @@ def dedupe_warnings(warnings: list[str]) -> list[str]:
     return list(dict.fromkeys(warnings))
 
 
+@contextmanager
+def schedule_route_cache_scope():
+    cache: dict[RouteCacheKey, ScheduleTransit] = {}
+    profile_cache: dict[PlaceProfileCacheKey, ExperienceProfile] = {}
+    rank_cache: dict[CandidateRankCacheKey, tuple[float, int, int, int, int, float]] = {}
+    place_lookup_cache: dict[int, CandidatePlace] = {}
+    route_token = ROUTE_CACHE.set(cache)
+    profile_token = PLACE_PROFILE_CACHE.set(profile_cache)
+    rank_token = CANDIDATE_RANK_CACHE.set(rank_cache)
+    place_lookup_token = PLACE_LOOKUP_CACHE.set(place_lookup_cache)
+    try:
+        yield cache
+    finally:
+        PLACE_LOOKUP_CACHE.reset(place_lookup_token)
+        CANDIDATE_RANK_CACHE.reset(rank_token)
+        PLACE_PROFILE_CACHE.reset(profile_token)
+        ROUTE_CACHE.reset(route_token)
+
+
+def place_profile_cache_key(candidate: CandidatePlace) -> PlaceProfileCacheKey:
+    return (
+        candidate.id,
+        candidate.category_label,
+        candidate.content_type_id,
+    )
+
+
+def cached_place_profile(candidate: CandidatePlace) -> ExperienceProfile:
+    cache = PLACE_PROFILE_CACHE.get()
+    key = place_profile_cache_key(candidate)
+    if cache is not None and key in cache:
+        return cache[key]
+    profile = classify_place(candidate.name, candidate.category_label, candidate.content_type_id)
+    if cache is not None:
+        cache[key] = profile
+    return profile
+
+
+def rounded_coord(value: Decimal | None) -> str:
+    if value is None:
+        return "0"
+    return f"{float(value):.4f}"
+
+
+def route_cache_key(
+    origin: TransitPoint,
+    destination: TransitPoint,
+    route_type: str,
+) -> RouteCacheKey:
+    return (
+        route_type,
+        rounded_coord(origin.longitude),
+        rounded_coord(origin.latitude),
+        rounded_coord(destination.longitude),
+        rounded_coord(destination.latitude),
+    )
+
+
+def request_rank_flags(request: ScheduleCreateRequest) -> tuple[bool, bool, bool, bool]:
+    return (
+        has_answer(request, "PACE_PACKED"),
+        has_answer(request, "PACE_RELAXED"),
+        low_mobility_profile(request),
+        has_answer(request, "TRANSIT_SIMPLE"),
+    )
+
+
+def theme_signature(theme_answer_ids: list[str]) -> str:
+    return "|".join(theme_answer_ids)
+
+
+def candidate_rank_cache_key(
+    candidate: CandidatePlace,
+    planned_day: PlannedDay,
+    request: ScheduleCreateRequest,
+    theme_answer_ids: list[str],
+) -> CandidateRankCacheKey:
+    pace_packed, pace_relaxed, low_mobility, transit_simple = request_rank_flags(request)
+    return (
+        candidate.id,
+        planned_day.day_no,
+        planned_day.date.isoformat(),
+        rounded_coord(planned_day.start_location.longitude),
+        rounded_coord(planned_day.start_location.latitude),
+        rounded_coord(planned_day.end_location.longitude),
+        rounded_coord(planned_day.end_location.latitude),
+        theme_signature(theme_answer_ids),
+        pace_packed,
+        pace_relaxed,
+        low_mobility,
+        transit_simple,
+    )
+
+
+def cached_candidate_rank(
+    candidate: CandidatePlace,
+    planned_day: PlannedDay,
+    request: ScheduleCreateRequest,
+    theme_answer_ids: list[str],
+) -> tuple[float, int, int, int, int, float]:
+    cache = CANDIDATE_RANK_CACHE.get()
+    key = candidate_rank_cache_key(candidate, planned_day, request, theme_answer_ids)
+    if cache is not None and key in cache:
+        return cache[key]
+    rank = candidate_rank(candidate, planned_day, request, theme_answer_ids)
+    if cache is not None:
+        cache[key] = rank
+    return rank
+
+
+def clone_transit_for_route(
+    transit: ScheduleTransit,
+    route_type: str,
+    route_order: int,
+) -> ScheduleTransit:
+    cloned = transit.model_copy(deep=True)
+    cloned.route_type = route_type
+    cloned.route_order = route_order
+    return cloned
+
+
 def resolve_transit(
     origin: TransitPoint,
     destination: TransitPoint,
     route_type: str,
     route_order: int,
 ) -> ScheduleTransit:
+    cache = ROUTE_CACHE.get()
+    key = route_cache_key(origin, destination, route_type)
+    if cache is not None and key in cache:
+        return clone_transit_for_route(cache[key], route_type, route_order)
     try:
         transit, _ = find_route(origin, destination, route_type, route_order)
+        if cache is not None:
+            cache[key] = clone_transit_for_route(transit, route_type, route_order)
         return transit
     except Exception:
         minutes = estimate_transit_minutes(
@@ -1192,6 +1449,8 @@ def resolve_transit(
             raise
         fallback.route_type = route_type
         fallback.route_order = route_order
+        if cache is not None:
+            cache[key] = clone_transit_for_route(fallback, route_type, route_order)
         return fallback
 
 
@@ -1358,9 +1617,11 @@ def policy_target_count(available_minutes: int, request: ScheduleCreateRequest) 
             return 4
         return 3
     if has_answer(request, "PACE_RELAXED"):
+        if available_minutes >= 480:
+            return 4
         if available_minutes >= 360:
             return 3
-        return 3
+        return 2
     if available_minutes >= 480:
         return 4
     if available_minutes >= 360:
@@ -1369,10 +1630,18 @@ def policy_target_count(available_minutes: int, request: ScheduleCreateRequest) 
 
 
 def primary_theme_answer_id(request: ScheduleCreateRequest) -> str | None:
-    for answer in request.selected_answers:
-        if answer.question_id == "THEME":
-            return answer.answer_id
+    theme_answer_ids = selected_theme_answer_ids(request)
+    if theme_answer_ids:
+        return theme_answer_ids[0]
     return None
+
+
+def selected_theme_answer_ids(request: ScheduleCreateRequest) -> list[str]:
+    return [
+        answer.answer_id
+        for answer in request.selected_answers
+        if answer.question_id == "THEME"
+    ]
 
 
 def has_answer(request: ScheduleCreateRequest, answer_id: str) -> bool:
@@ -1421,10 +1690,10 @@ def resolve_place_or_400(place_id: int) -> CandidatePlace:
     존재하지 않는 장소로 일정을 만들면 저장 단계에서 반드시 실패하므로,
     가짜 장소를 지어내지 않고 400 으로 거절한다.
     """
-    for candidate in CANDIDATE_POOL:
+    for candidate in current_candidate_pool():
         if candidate.id == place_id:
             return candidate
-    resolved = (load_candidate_places_by_ids([place_id]) or {}).get(place_id)
+    resolved = (cached_candidate_places_by_ids([place_id]) or {}).get(place_id)
     if resolved is None:
         raise HTTPException(status_code=400, detail=f"placeId {place_id} does not exist")
     return resolved
@@ -1452,9 +1721,10 @@ def choose_candidate_places(
     selected_semantic_groups: list[str] = []
     # 후보 풀은 모듈 로드 시 한 번만 채워지므로 그 뒤 등록된 장소는 들어 있지 않다.
     # 풀에 없는 id 만 DB 에서 한 번에 읽어온다.
-    pool_by_id = {item.id: item for item in CANDIDATE_POOL}
+    candidate_pool = current_candidate_pool()
+    pool_by_id = {item.id: item for item in candidate_pool}
     missing_ids = [pid for pid in must_visit_ids if pid not in pool_by_id]
-    resolved_from_db = load_candidate_places_by_ids(missing_ids) or {}
+    resolved_from_db = cached_candidate_places_by_ids(missing_ids) or {}
 
     for place_id in must_visit_ids:
         candidate = pool_by_id.get(place_id) or resolved_from_db.get(place_id)
@@ -1467,7 +1737,7 @@ def choose_candidate_places(
             )
         resolved.append(candidate)
         seen_ids.add(candidate.id)
-        profile = classify_place(candidate.name, candidate.category_label, candidate.content_type_id)
+        profile = cached_place_profile(candidate)
         selected_experience_types.append(profile.experience_type)
         selected_semantic_groups.append(profile.semantic_group)
 
@@ -1475,14 +1745,14 @@ def choose_candidate_places(
     if remaining == 0:
         return resolved[:target_count]
 
-    theme_answer_id = primary_theme_answer_id(request)
+    theme_answer_ids = selected_theme_answer_ids(request)
     ranked = sorted(
         (
             candidate
-            for candidate in CANDIDATE_POOL
+            for candidate in candidate_pool
             if candidate.id not in seen_ids and not is_day_endpoint(candidate, planned_day)
         ),
-        key=lambda candidate: candidate_rank(candidate, planned_day, request, theme_answer_id),
+        key=lambda candidate: cached_candidate_rank(candidate, planned_day, request, theme_answer_ids),
     )
     # 앞선 일차에서 쓴 장소는 뒤로 미룬다. 완전히 배제하지 않는 이유는 후보 풀이
     # 작을 때 일차가 비는 것을 막기 위해서다.
@@ -1492,7 +1762,7 @@ def choose_candidate_places(
     for candidate in ranked:
         if len(resolved) >= target_count:
             break
-        profile = classify_place(candidate.name, candidate.category_label, candidate.content_type_id)
+        profile = cached_place_profile(candidate)
         if exceeds_strong_preference_diversity(
             profile.experience_type,
             profile.semantic_group,
@@ -1555,9 +1825,9 @@ def candidate_rank(
     candidate: CandidatePlace,
     planned_day: PlannedDay,
     request: ScheduleCreateRequest,
-    theme_answer_id: str | None,
-) -> tuple[int, int, int, int, int, float]:
-    theme_penalty = theme_penalty_score(candidate, theme_answer_id)
+    theme_answer_ids: list[str],
+) -> tuple[float, int, int, int, int, float]:
+    theme_penalty = theme_penalty_score(candidate, theme_answer_ids)
     pace_penalty = pace_penalty_score(candidate, request)
     mobility_penalty = mobility_penalty_score(candidate, request)
     transit_penalty = transfer_penalty_score(candidate, planned_day, request)
@@ -1635,9 +1905,11 @@ def repair_schedule_days(
     planned_days: list[PlannedDay],
     days: list[ScheduleDay],
     target_counts: dict[int, int],
+    request: ScheduleCreateRequest,
 ) -> tuple[list[ScheduleDay], list[str]]:
     repaired = [day.model_copy(deep=True) for day in days]
     warnings: list[str] = []
+    dirty_indexes: set[int] = set()
     changed = True
     while changed:
         changed = False
@@ -1648,20 +1920,42 @@ def repair_schedule_days(
             repaired_day = recalculate_day(day, day.stops)
             if day_overrun_minutes(repaired_day) <= 0:
                 repaired[index] = repaired_day
+                dirty_indexes.add(index)
                 warnings.append("일정 시간을 맞추기 위해 일부 방문지 체류 시간이 조정되었습니다.")
                 changed = True
                 continue
-            moved = move_last_optional_stop(
+            moved_indexes = move_last_optional_stop(
                 repaired,
                 index,
                 planned_days,
                 target_counts,
             )
-            if moved:
+            if moved_indexes is not None:
+                dirty_indexes.update(moved_indexes)
                 warnings.append("일정 시간을 맞추기 위해 일부 방문지가 다른 날짜로 이동되었습니다.")
                 changed = True
-    for index, day in enumerate(repaired):
-        repaired[index] = recalculate_day(day, day.stops)
+        for index, day in enumerate(repaired):
+            expanded = try_expand_underfilled_day(
+                repaired,
+                index,
+                planned_days[index],
+                target_counts,
+                request,
+            )
+            if expanded is not None:
+                repaired[index] = expanded
+                dirty_indexes.add(index)
+                warnings.append("하루 활동 시간이 너무 짧지 않도록 방문지를 추가로 배치했습니다.")
+                changed = True
+                continue
+            extended = try_extend_underfilled_day_stays(day)
+            if extended is not None:
+                repaired[index] = extended
+                dirty_indexes.add(index)
+                warnings.append("하루 활동 시간이 너무 짧지 않도록 일부 방문지 체류 시간을 늘렸습니다.")
+                changed = True
+    for index in sorted(dirty_indexes):
+        repaired[index] = recalculate_day(repaired[index], repaired[index].stops)
     return repaired, dedupe_warnings(warnings)
 
 
@@ -1685,19 +1979,51 @@ def day_overrun_minutes(day: ScheduleDay) -> int:
     return max(0, planned - available)
 
 
+def day_used_minutes(day: ScheduleDay) -> int:
+    planned = sum(
+        stop.stay_minutes
+        + stop.waiting_minutes_before
+        + (stop.inbound_transit.total_minutes if stop.inbound_transit else 0)
+        for stop in day.stops
+    )
+    if day.final_transit is not None:
+        planned += day.final_transit.total_minutes
+    return planned
+
+
+def day_available_minutes(day: ScheduleDay) -> int:
+    if not day.start_time or not day.end_time:
+        return 0
+    return int(
+        (
+            datetime.combine(day.date, day.end_time)
+            - datetime.combine(day.date, day.start_time)
+        ).total_seconds() // 60
+    )
+
+
+def day_underfilled(day: ScheduleDay) -> bool:
+    available = day_available_minutes(day)
+    if available <= 0:
+        return False
+    used = day_used_minutes(day)
+    unused = available - used
+    return unused >= EARLY_FINISH_BUFFER_MINUTES and used < int(available * MIN_DAY_UTILIZATION_RATIO)
+
+
 def move_last_optional_stop(
     repaired: list[ScheduleDay],
     source_index: int,
     planned_days: list[PlannedDay],
     target_counts: dict[int, int],
-) -> bool:
+) -> tuple[int, int] | None:
     source_day = repaired[source_index]
     movable_stops = [
         stop for stop in reversed(source_day.stops)
         if stop.fixed_starts_at is None and "must_visit_seed" not in stop.selection_reasons
     ]
     if not movable_stops:
-        return False
+        return None
     stop_to_move = movable_stops[0]
     for target_index, target_day in enumerate(repaired):
         if target_index == source_index:
@@ -1711,18 +2037,157 @@ def move_last_optional_stop(
         remaining_source = [stop for stop in source_day.stops if stop.id != stop_to_move.id]
         repaired[source_index] = recalculate_day(source_day, remaining_source)
         repaired[target_index] = recalc_target
-        return True
-    return False
-    return CandidatePlace(
-        id=place_id,
-        external_id=f"FASTAPI_{place_id}",
-        content_type_id=category_code or "12",
-        name=f"Place {place_id}",
-        category_label=category_label,
-        address=None,
-        longitude=longitude,
-        latitude=latitude,
+        return source_index, target_index
+    return None
+
+
+def fixed_event_specs_from_day(day: ScheduleDay) -> list[FixedEventSpec]:
+    specs: list[FixedEventSpec] = []
+    for stop in day.stops:
+        if stop.fixed_starts_at is None or stop.fixed_ends_at is None or stop.place.id is None:
+            continue
+        specs.append(
+            FixedEventSpec(
+                place_id=stop.place.id,
+                name=stop.place.name,
+                starts_at=stop.fixed_starts_at,
+                ends_at=stop.fixed_ends_at,
+            )
+        )
+    return specs
+
+
+def try_expand_underfilled_day(
+    repaired: list[ScheduleDay],
+    index: int,
+    planned_day: PlannedDay,
+    target_counts: dict[int, int],
+    request: ScheduleCreateRequest,
+) -> ScheduleDay | None:
+    current_day = repaired[index]
+    if not day_underfilled(current_day):
+        return None
+    if len(current_day.stops) >= MAX_STOPS_PER_DAY:
+        return None
+
+    current_place_ids = [
+        stop.place.id for stop in current_day.stops
+        if stop.place is not None and stop.place.id is not None
+    ]
+    used_elsewhere = {
+        stop.place.id
+        for day_idx, day in enumerate(repaired)
+        if day_idx != index
+        for stop in day.stops
+        if stop.place is not None and stop.place.id is not None
+    }
+    fixed_events = fixed_event_specs_from_day(current_day)
+    attempt_target = max(target_counts.get(current_day.day_no, len(current_place_ids)), len(current_place_ids))
+    best_day = current_day
+    best_used = day_used_minutes(current_day)
+
+    while attempt_target < MAX_STOPS_PER_DAY:
+        attempt_target += 1
+        rebuilt_stops = build_stops(
+            planned_day,
+            current_place_ids,
+            attempt_target,
+            request,
+            fixed_events,
+            used_elsewhere,
+        )
+        if len(rebuilt_stops) <= len(best_day.stops):
+            continue
+        rebuilt_day = current_day.model_copy(deep=True)
+        rebuilt_day.stops = rebuilt_stops
+        rebuilt_day.summary = build_stop_summary(rebuilt_stops)
+        rebuilt_day = recalculate_day(rebuilt_day, rebuilt_stops)
+        if day_overrun_minutes(rebuilt_day) > 0:
+            continue
+        rebuilt_used = day_used_minutes(rebuilt_day)
+        if rebuilt_used <= best_used:
+            continue
+        best_day = rebuilt_day
+        best_used = rebuilt_used
+        if not day_underfilled(rebuilt_day):
+            break
+
+    if best_day is current_day:
+        return None
+    return best_day
+
+
+def target_used_minutes_for_underfilled_day(day: ScheduleDay) -> int:
+    available = day_available_minutes(day)
+    if available <= 0:
+        return 0
+    return min(
+        available,
+        max(
+            int(available * TARGET_DAY_UTILIZATION_RATIO),
+            available - TARGET_DAY_UNUSED_BUFFER_MINUTES,
+        ),
     )
+
+
+def extendable_stay_minutes(stop: ScheduleStop) -> int:
+    if stop.fixed_starts_at is not None:
+        return 0
+    candidate = CandidatePlace(
+        id=stop.place.id or 0,
+        external_id=str(stop.place.id or 0),
+        content_type_id=stop.place.category or "12",
+        name=stop.place.name,
+        category_label=stop.place.category_label,
+        address=stop.place.address,
+        longitude=stop.place.longitude or Decimal("129.0403"),
+        latitude=stop.place.latitude or Decimal("35.1151"),
+    )
+    return max(0, max_visit_duration_minutes(candidate) - stop.stay_minutes)
+
+
+def try_extend_underfilled_day_stays(day: ScheduleDay) -> ScheduleDay | None:
+    if not day_underfilled(day):
+        return None
+    target_used = target_used_minutes_for_underfilled_day(day)
+    current_used = day_used_minutes(day)
+    extra_needed = max(0, target_used - current_used)
+    if extra_needed <= 0:
+        return None
+
+    adjusted_stops = [stop.model_copy(deep=True) for stop in day.stops]
+    if not adjusted_stops:
+        return None
+
+    changed = False
+    while extra_needed > 0:
+        progressed = False
+        for stop in adjusted_stops:
+            capacity = extendable_stay_minutes(stop)
+            if capacity <= 0:
+                continue
+            addition = min(capacity, 15, extra_needed)
+            stop.stay_minutes += addition
+            stop.warnings = dedupe_warnings(
+                stop.warnings + ["하루 활동 시간이 너무 짧지 않도록 체류 시간이 일부 늘어났습니다."]
+            )
+            extra_needed -= addition
+            progressed = True
+            changed = True
+            if extra_needed <= 0:
+                break
+        if not progressed:
+            break
+
+    if not changed:
+        return None
+
+    extended_day = recalculate_day(day, adjusted_stops)
+    if day_overrun_minutes(extended_day) > 0:
+        return None
+    if day_used_minutes(extended_day) <= day_used_minutes(day):
+        return None
+    return extended_day
 
 
 def distance_meters(
@@ -1773,15 +2238,36 @@ def candidate_themes(candidate: CandidatePlace) -> list[str]:
     return ordered
 
 
-def theme_penalty_score(candidate: CandidatePlace, theme_answer_id: str | None) -> int:
-    if theme_answer_id is None:
+def theme_match_penalty(candidate_themes: list[str], theme_answer_id: str) -> int:
+    if theme_answer_id in candidate_themes:
         return 0
-    themes = candidate_themes(candidate)
-    if theme_answer_id in themes:
-        return 0
-    if theme_answer_id == "THEME_HEALING" and any(theme in themes for theme in ("THEME_NATURE", "THEME_FOOD")):
+    if theme_answer_id == "THEME_HEALING" and any(theme in candidate_themes for theme in ("THEME_NATURE", "THEME_FOOD")):
         return 1
     return 3
+
+
+def theme_penalty_score(candidate: CandidatePlace, theme_answer_ids: list[str]) -> float:
+    if not theme_answer_ids:
+        return 0.0
+    themes = candidate_themes(candidate)
+    weighted_penalty = 0.0
+    matched_count = 0
+    for index, theme_answer_id in enumerate(theme_answer_ids):
+        if index == 0:
+            weight = 1.0
+        elif index == 1:
+            weight = 0.7
+        elif index == 2:
+            weight = 0.4
+        else:
+            weight = 0.25
+        match_penalty = theme_match_penalty(themes, theme_answer_id)
+        weighted_penalty += match_penalty * weight
+        if match_penalty == 0:
+            matched_count += 1
+    if matched_count >= 2:
+        weighted_penalty -= 0.5
+    return max(0.0, weighted_penalty)
 
 
 def pace_penalty_score(candidate: CandidatePlace, request: ScheduleCreateRequest) -> int:

@@ -318,8 +318,15 @@ def generate_course(
     """
 
     course = []
-
     order = 1
+
+    if hasattr(current_location, "latitude"):
+        cursor_location = {
+            "latitude": current_location.latitude,
+            "longitude": current_location.longitude,
+        }
+    else:
+        cursor_location = dict(current_location)
 
 
     patterns = [
@@ -345,7 +352,7 @@ def generate_course(
             places,
             desired_themes,
             role,
-            current_location,
+            cursor_location,
         )
 
 
@@ -360,10 +367,9 @@ def generate_course(
                 "name":
                     selected.get("name")
                     or selected.get("title"),
-
+                "contentId": selected.get("contentId"),
                 "latitude": selected.get("latitude"),
                 "longitude": selected.get("longitude"),
-                "contentId": selected.get("contentId"),
                 "contentTypeId": selected.get("contentTypeId"),
 
                 "stayMinutes": stay_minutes,
@@ -381,12 +387,17 @@ def generate_course(
                             selected,
                             desired_themes,
                             role,
-                            current_location,
+                            cursor_location,
                         ),
                         4
                     ),
             }
         )
+
+        cursor_location = {
+            "latitude": selected.get("latitude"),
+            "longitude": selected.get("longitude"),
+        }
 
 
         order += 1

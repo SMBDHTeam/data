@@ -513,6 +513,20 @@ def get_transport_options(
     return options
 
 
+def get_travel_minutes_for_mode(
+    origin: Coordinate,
+    destination: Coordinate,
+    mode: TransportMode,
+) -> int | None:
+    if mode == TransportMode.PUBLIC_TRANSIT:
+        return search_public_transit_minutes(origin, destination)
+    if mode == TransportMode.WALK:
+        return search_walking_minutes(origin, destination)
+    if mode == TransportMode.CAR:
+        return search_car_minutes(origin, destination)
+    return None
+
+
 def get_best_travel_minutes(
     options: list[TransportOption],
 ) -> int | None:

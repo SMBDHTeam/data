@@ -43,6 +43,16 @@ from schedule.models import (
 
 log = logging.getLogger("data.schedule.persistence")
 
+CONTENT_TYPE_FALLBACK_LABELS = {
+    "12": "관광지",
+    "14": "문화시설",
+    "15": "축제·공연",
+    "28": "레포츠",
+    "32": "숙박",
+    "38": "쇼핑",
+    "39": "음식점",
+}
+
 
 def resolve_db_dsn() -> tuple[str | None, str | None, str | None]:
     jdbc_url = os.getenv("SPRING_DATASOURCE_URL")
@@ -64,6 +74,16 @@ def resolve_db_dsn() -> tuple[str | None, str | None, str | None]:
 def db_enabled() -> bool:
     dsn, _, _ = resolve_db_dsn()
     return bool(dsn)
+
+
+def normalize_category_label(raw_label: str | None, content_type_id: str | None) -> str:
+    normalized = (raw_label or "").strip()
+    fallback = CONTENT_TYPE_FALLBACK_LABELS.get(str(content_type_id or ""), "관광지")
+    if not normalized:
+        return fallback
+    if normalized.startswith("A") and normalized[1:].isdigit():
+        return fallback
+    return normalized
 
 
 def connect():
@@ -178,7 +198,17 @@ def mark_preview_consumed(preview_id: UUID) -> None:
         conn.commit()
 
 
-def save_schedule(schedule: ScheduleResponse, condition_request: ScheduleCreateRequest) -> None:
+def save_schedule(
+    schedule: ScheduleResponse,
+    condition_request: ScheduleCreateRequest,
+    owner_id: int | None = None,
+) -> None:
+    """일정을 저장한다.
+
+    owner_id 는 Spring 이 검증한 토큰에서 꺼내 X-Auth-User-Id 헤더로 전달한 값이다.
+    한 번 정해진 소유자는 바꾸지 않는다. 수정 요청은 소유자를 싣지 않으므로,
+    덮어쓰면 첫 수정에서 주인이 사라진다.
+    """
     with connect() as conn:
         with conn.cursor() as cur:
             place_ids = sorted({stop.place.id for day in schedule.days for stop in day.stops if stop.place.id is not None})
@@ -196,12 +226,12 @@ def save_schedule(schedule: ScheduleResponse, condition_request: ScheduleCreateR
                     id, status, start_date, end_date, daily_start_time, daily_end_time,
                     start_place_name, start_longitude, start_latitude, end_place_name, end_longitude, end_latitude,
                     preview_id, time_zone, lodging_mode, route_coverage, planning_warnings_json,
-                    style_summary, condition_json, created_at, updated_at
+                    style_summary, condition_json, user_id, created_at, updated_at
                 ) VALUES (
                     %(id)s, %(status)s, %(start_date)s, %(end_date)s, %(daily_start_time)s, %(daily_end_time)s,
                     %(start_place_name)s, %(start_longitude)s, %(start_latitude)s, %(end_place_name)s, %(end_longitude)s, %(end_latitude)s,
                     %(preview_id)s, %(time_zone)s, %(lodging_mode)s, %(route_coverage)s, %(planning_warnings_json)s,
-                    %(style_summary)s, %(condition_json)s, COALESCE((SELECT created_at FROM schedules WHERE id = %(id)s), %(now)s), %(now)s
+                    %(style_summary)s, %(condition_json)s, %(user_id)s, COALESCE((SELECT created_at FROM schedules WHERE id = %(id)s), %(now)s), %(now)s
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     status = EXCLUDED.status,
@@ -222,6 +252,9 @@ def save_schedule(schedule: ScheduleResponse, condition_request: ScheduleCreateR
                     planning_warnings_json = EXCLUDED.planning_warnings_json,
                     style_summary = EXCLUDED.style_summary,
                     condition_json = EXCLUDED.condition_json,
+                    -- 이미 주인이 있으면 유지한다. 수정 요청은 소유자를 싣지 않아
+                    -- 그대로 덮으면 첫 수정에서 NULL 이 된다.
+                    user_id = COALESCE(schedules.user_id, EXCLUDED.user_id),
                     updated_at = EXCLUDED.updated_at
                 """,
                 {
@@ -237,6 +270,7 @@ def save_schedule(schedule: ScheduleResponse, condition_request: ScheduleCreateR
                     "end_place_name": schedule.days[-1].end_location.name if schedule.days and schedule.days[-1].end_location else None,
                     "end_longitude": schedule.days[-1].end_location.longitude if schedule.days and schedule.days[-1].end_location else None,
                     "end_latitude": schedule.days[-1].end_location.latitude if schedule.days and schedule.days[-1].end_location else None,
+                    "user_id": owner_id,
                     "preview_id": schedule.preview_id,
                     "time_zone": schedule.planning_assumptions.time_zone if schedule.planning_assumptions else "Asia/Seoul",
                     "lodging_mode": schedule.planning_assumptions.lodging_mode if schedule.planning_assumptions else "UNSPECIFIED",
@@ -484,10 +518,29 @@ def load_schedule(schedule_id: UUID) -> ScheduleResponse:
     return items[0]
 
 
-def list_schedules() -> ScheduleListResponse:
+def list_schedules(user_id: int | None = None) -> ScheduleListResponse:
+    """일정 목록.
+
+    user_id 가 있으면 그 사용자의 일정만 준다. 없으면 전체를 준다.
+
+    Spring 이 로그인한 사용자를 넘긴다. 여기서 거르지 않고 전체를 돌려주면 남의 일정이
+    그대로 노출되고, Spring 이 받아서 거르면 페이징이 맞지 않는다.
+
+    인증 도입 전에 만들어진 일정은 user_id 가 NULL 이라 어느 사용자 목록에도 나오지
+    않는다. 소유자를 되짚을 근거가 없으므로 의도한 결과다.
+    """
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM schedules ORDER BY start_date ASC, created_at DESC")
+            if user_id is None:
+                cur.execute(
+                    "SELECT id FROM schedules ORDER BY start_date ASC, created_at DESC"
+                )
+            else:
+                cur.execute(
+                    "SELECT id FROM schedules WHERE user_id = %s "
+                    "ORDER BY start_date ASC, created_at DESC",
+                    (user_id,),
+                )
             ids = [row["id"] for row in cur.fetchall()]
     return load_schedules(ids)
 
@@ -559,7 +612,7 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
             id=row["place_id"],
             name=row["place_name"],
             category=row["content_type_id"],
-            categoryLabel=row["category"] or "미확인",
+            categoryLabel=normalize_category_label(row["category"], row["content_type_id"]),
             address=row["address"],
             longitude=row["longitude"],
             latitude=row["latitude"],

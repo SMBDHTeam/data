@@ -20,7 +20,7 @@ class SpontaneousDestinationRequest(BaseModel):
     currentLocation: Coordinate
     startAt: datetime
     returnBy: datetime
-    desiredThemes: list[str] = []
+    desiredThemes: list[str] = Field(default_factory=list)
 
 
 class TransportOption(BaseModel):
@@ -39,16 +39,53 @@ class DestinationRecommendation(BaseModel):
     themeScore: float
     distanceMeters: int
     score: float
-    transportOptions: list[TransportOption] = []
+    bestTravelMinutes: int | None = None
+    bestStayMinutes: int | None = None
+    transportOptions: list[TransportOption] = Field(default_factory=list)
 
 
 class SpontaneousDestinationResponse(BaseModel):
     destinations: list[DestinationRecommendation]
+
+
+class SpontaneousCourseStop(BaseModel):
+    order: int
+    role: str
+    name: str
+    contentId: str | None = None
+    contentTypeId: str | None = None
+    latitude: float
+    longitude: float
+    travelMinutesFromPrevious: int | None = None
+    arrivalAt: datetime | None = None
+    departureAt: datetime | None = None
+    returnTravelMinutes: int | None = None
+    inboundMinutes: int | None = None
+    arriveAt: datetime | None = None
+    departAt: datetime | None = None
+    stayMinutes: int
+    themes: list[str] = Field(default_factory=list)
+    score: float
+
+
+class SpontaneousCourseResponse(BaseModel):
+    destinationId: str
+    name: str
+    transportMode: TransportMode
+    transport: TransportOption | None = None
+    returnTravelMinutes: int | None = None
+    finalReturnMinutes: int | None = None
+    estimatedReturnAt: datetime | None = None
+    expectedReturnAt: datetime | None = None
+    returnBy: datetime | None = None
+    candidateCounts: dict[str, int] = Field(default_factory=dict)
+    course: list[SpontaneousCourseStop] = Field(default_factory=list)
+
 
 class SpontaneousCourseRequest(BaseModel):
     destinationId: str
     currentLocation: Coordinate
     startAt: datetime
     returnBy: datetime
-    desiredThemes: list[str] = []
+    desiredThemes: list[str] = Field(default_factory=list)
     transportMode: TransportMode

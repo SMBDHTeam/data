@@ -8,10 +8,6 @@ from time import monotonic
 from typing import Any
 from uuid import UUID
 
-# ---
-from fastapi import FastAPI, HTTPException
-# ---
-
 import joblib
 import numpy as np
 import pandas as pd
@@ -40,8 +36,8 @@ from schedule.preview_service import (
     get_preview,
 )
 from schedule.service import (
-    CANDIDATE_POOL,
-    CANDIDATE_POOL_SOURCE,
+    current_candidate_pool,
+    current_candidate_pool_source,
     db_runtime_status,
     create_schedule,
     get_schedule,
@@ -49,14 +45,12 @@ from schedule.service import (
     list_schedules,
     update_schedule,
 )
-
-
-# ------
 from spontaneous.models import (
     Coordinate,
+    SpontaneousCourseRequest,
+    SpontaneousCourseResponse,
     SpontaneousDestinationRequest,
     SpontaneousDestinationResponse,
-    SpontaneousCourseRequest,
     TransportMode,
 )
 
@@ -411,11 +405,12 @@ log = logging.getLogger("data.app")
 
 @app.get("/health")
 def health() -> dict[str, str | int | bool | None]:
+    candidate_pool = current_candidate_pool()
     return {
         "status": "ok",
         "model_path": str(MODEL_PATH),
-        "schedule_candidate_source": CANDIDATE_POOL_SOURCE,
-        "schedule_candidate_count": len(CANDIDATE_POOL),
+        "schedule_candidate_source": current_candidate_pool_source(),
+        "schedule_candidate_count": len(candidate_pool),
         "schedule_db_enabled": db_runtime_status()["db_enabled"],
         "schedule_db_host": db_runtime_status()["db_host"],
         "odsay_enabled": os.getenv("ODSAY_ENABLED", "false").lower() == "true",
@@ -508,7 +503,14 @@ def get_schedule_preview_endpoint(preview_id: UUID) -> SchedulePreviewResponse:
 def create_schedule_endpoint(
     payload: ScheduleCreateRequest | SchedulePreviewScheduleRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    auth_user_id: int | None = Header(default=None, alias="X-Auth-User-Id"),
 ) -> ScheduleResponse:
+    """일정을 만든다.
+
+    X-Auth-User-Id 는 Spring 이 검증한 액세스 토큰에서 꺼낸 소유자다. 외부에서 직접
+    들어오는 값이 아니라 같은 도커 네트워크 안의 Spring 만 보낸다. 헤더가 없으면
+    소유자 없는 일정으로 저장한다. 인가를 아직 켜지 않아 비로그인 생성이 가능하다.
+    """
     started_at = monotonic()
     if idempotency_key:
         if not isinstance(payload, SchedulePreviewScheduleRequest):
@@ -523,6 +525,7 @@ def create_schedule_endpoint(
             create_request,
             preview_id=preview.preview_id,
             fixed_events_by_day=fixed_events_by_day,
+            owner_id=auth_user_id,
         )
         attach_schedule_to_preview(preview.preview_id, schedule.id)
         log.info(
@@ -540,7 +543,7 @@ def create_schedule_endpoint(
         payload.start_date,
         payload.end_date,
     )
-    schedule = create_schedule(payload)
+    schedule = create_schedule(payload, owner_id=auth_user_id)
     log.info(
         "direct schedule created. scheduleId=%s, elapsedMs=%d",
         schedule.id,
@@ -550,8 +553,13 @@ def create_schedule_endpoint(
 
 
 @app.get("/api/v1/schedules", response_model=ScheduleListResponse)
-def list_schedules_endpoint() -> ScheduleListResponse:
-    return list_schedules()
+def list_schedules_endpoint(userId: int | None = None) -> ScheduleListResponse:
+    """일정 목록.
+
+    userId 는 Spring 이 검증한 액세스 토큰에서 꺼낸 소유자다. 생략하면 전체를 준다.
+    Spring 은 로그인하지 않은 요청에는 아예 호출하지 않고 빈 목록을 돌려준다.
+    """
+    return list_schedules(userId)
 
 
 @app.get("/api/v1/schedules/{schedule_id}", response_model=ScheduleResponse)
@@ -568,14 +576,12 @@ def update_schedule_endpoint(schedule_id: UUID, payload: ScheduleUpdateRequest) 
 def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> ScheduleMapResponse:
     return get_schedule_map(schedule_id, dayNo)
 
-# -------
-@app.post("/api/v1/spontaneous-trips/destinations")
+
+@app.post("/api/v1/spontaneous-trips/destinations", response_model=SpontaneousDestinationResponse)
 def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
-):
+) -> SpontaneousDestinationResponse:
     candidates = []
-
-   
     for zone in DESTINATION_ZONES:
         final_score, theme_score, distance = calculate_destination_score(
             zone,
@@ -592,26 +598,18 @@ def recommend_spontaneous_destinations(
             }
         )
 
-    
     candidates.sort(
         key=lambda item: item["score"],
         reverse=True,
     )
 
-   
-    # top_candidates = candidates[:5]
-
     results = []
-
     for candidate in candidates:
         zone = candidate["zone"]
-
         destination = Coordinate(
             latitude=zone.center_latitude,
             longitude=zone.center_longitude,
         )
-
-        
         transport_options = get_transport_options(
             request.currentLocation,
             destination,
@@ -623,14 +621,12 @@ def recommend_spontaneous_destinations(
             option.available
             for option in transport_options
         )
-
         if not has_available_transport:
-                    continue
+            continue
 
         best_travel_minutes = get_best_travel_minutes(
             transport_options
         )
-
         best_stay_minutes = get_best_stay_minutes(
             transport_options
         )
@@ -640,8 +636,6 @@ def recommend_spontaneous_destinations(
             best_travel_minutes,
             best_stay_minutes,
         )
-
-        
 
         results.append(
             {
@@ -659,24 +653,22 @@ def recommend_spontaneous_destinations(
             }
         )
 
-        if len(results) >= 5:
-            break
-
     results.sort(
         key=lambda item: item["score"],
         reverse=True,
     )
+    if not results:
+        raise HTTPException(status_code=404, detail="DESTINATIONS_NOT_FOUND")
+
+    return SpontaneousDestinationResponse(destinations=results[:5])
 
 
-    return {
-        "destinations": results
-    }
-
-
-@app.post("/api/v1/spontaneous-trips/course")
+@app.post("/api/v1/spontaneous-trips/course", response_model=SpontaneousCourseResponse)
 def create_spontaneous_course(
     request: SpontaneousCourseRequest,
-):
+) -> SpontaneousCourseResponse:
+    started_at = monotonic()
+
     if request.returnBy <= request.startAt:
         raise HTTPException(
             status_code=422,
@@ -698,7 +690,6 @@ def create_spontaneous_course(
             status_code=404,
             detail="DESTINATION_NOT_FOUND",
         )
-
 
     # 1. 목적지 장소 조회
     try:
@@ -821,6 +812,15 @@ def create_spontaneous_course(
         ]
 
         if estimated_return_at <= request.returnBy:
+            log.info(
+                "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, returnMinutes=%s, elapsedMs=%d",
+                request.destinationId,
+                request.transportMode,
+                len(timeline["course"]),
+                timeline["returnTravelMinutes"],
+                int((monotonic() - started_at) * 1000),
+            )
+
             return {
                 "destinationId": zone.destination_id,
                 "name": zone.name,
@@ -832,7 +832,11 @@ def create_spontaneous_course(
                 "returnTravelMinutes": timeline[
                     "returnTravelMinutes"
                 ],
+                "finalReturnMinutes": timeline[
+                    "returnTravelMinutes"
+                ],
                 "estimatedReturnAt": estimated_return_at.isoformat(),
+                "expectedReturnAt": estimated_return_at.isoformat(),
                 "returnBy": request.returnBy.isoformat(),
                 "candidateCounts": {
                     "searched": before_count,

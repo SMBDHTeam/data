@@ -8,6 +8,20 @@ from spontaneous.destinations import DestinationZone
 from datetime import datetime, time
 
 TOUR_API_BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
+TourApiDetailCache = dict[tuple[str, str], dict]
+SEAFOOD_MENU_KEYWORDS = [
+    "회",
+    "횟집",
+    "해산물",
+    "수산",
+    "우럭",
+    "광어",
+    "참치",
+    "초밥",
+    "물회",
+    "전복",
+    "장어",
+]
 
 
 
@@ -58,6 +72,25 @@ def filter_course_places(
             and has_valid_coordinates(place)
         )
     ]
+
+
+def detail_cache_key(
+    content_id: str | int | None,
+    content_type_id: str | int | None = "39",
+) -> tuple[str, str] | None:
+    if content_id is None:
+        return None
+
+    content_id_text = str(content_id).strip()
+    content_type_id_text = str(content_type_id or "").strip()
+
+    if not content_id_text or not content_type_id_text:
+        return None
+
+    return (
+        content_type_id_text,
+        content_id_text,
+    )
 
 
 
@@ -157,6 +190,36 @@ def infer_place_themes(
         "비치",
     ]
 
+    nature_keywords = [
+        "공원",
+        "숲",
+        "수목원",
+        "섬",
+        "산",
+        "태종대",
+        "동백",
+        "생태",
+    ]
+
+    healing_keywords = [
+        "온천",
+        "스파",
+        "사우나",
+        "휴양",
+        "힐링",
+        "휴식",
+        "테라피",
+    ]
+
+    night_view_keywords = [
+        "야경",
+        "전망대",
+        "전망",
+        "타워",
+        "스카이워크",
+        "등대",
+    ]
+
     if (
         content_type_id in {"38", "39"}
         and any(
@@ -174,6 +237,30 @@ def infer_place_themes(
         )
     ):
         themes.add("SEA")
+
+    if (
+        content_type_id in {"12", "14", "15", "28"}
+        and any(
+            keyword in title
+            for keyword in nature_keywords
+        )
+    ):
+        themes.add("NATURE")
+
+    if any(
+        keyword in title
+        for keyword in healing_keywords
+    ):
+        themes.add("HEALING")
+
+    if (
+        content_type_id in {"12", "14", "15", "28"}
+        and any(
+            keyword in title
+            for keyword in night_view_keywords
+        )
+    ):
+        themes.add("NIGHT_VIEW")
 
     return themes
 
@@ -203,7 +290,21 @@ def filter_places_by_themes(
 
 def search_food_detail(
     content_id: str,
+    detail_cache: TourApiDetailCache | None = None,
+    content_type_id: str = "39",
 ) -> dict:
+    cache_key = detail_cache_key(
+        content_id,
+        content_type_id,
+    )
+
+    if (
+        detail_cache is not None
+        and cache_key is not None
+        and cache_key in detail_cache
+    ):
+        return detail_cache[cache_key]
+
     service_key = os.getenv("TOUR_API_KEY")
 
     if not service_key:
@@ -215,7 +316,7 @@ def search_food_detail(
         "MobileApp": "BusanTour",
         "_type": "json",
         "contentId": content_id,
-        "contentTypeId": "39",
+        "contentTypeId": content_type_id,
     }
 
     url = (
@@ -243,7 +344,16 @@ def search_food_detail(
         if not items:
             return {}
 
-        return items[0]
+        detail = items[0]
+
+        if (
+            detail_cache is not None
+            and cache_key is not None
+            and detail
+        ):
+            detail_cache[cache_key] = detail
+
+        return detail
 
     except (KeyError, IndexError, TypeError):
         return {}
@@ -252,6 +362,8 @@ def search_food_detail(
 def enrich_food_themes(
     place: dict,
     themes: set[str],
+    detail_cache: TourApiDetailCache | None = None,
+    detail: dict | None = None,
 ) -> set[str]:
     """
     음식점 상세 정보를 이용해 테마 보강
@@ -273,27 +385,15 @@ def enrich_food_themes(
         return themes
 
     try:
-        detail = search_food_detail(
-            content_id
-        )
+        if detail is None:
+            detail = search_food_detail(
+                content_id,
+                detail_cache=detail_cache,
+                content_type_id=content_type_id,
+            )
 
     except Exception:
         return themes
-
-
-    seafood_keywords = [
-        "회",
-        "횟집",
-        "해산물",
-        "수산",
-        "우럭",
-        "광어",
-        "참치",
-        "초밥",
-        "물회",
-        "전복",
-        "장어",
-    ]
 
 
     menu_text = " ".join(
@@ -306,7 +406,7 @@ def enrich_food_themes(
 
     if any(
         keyword in menu_text
-        for keyword in seafood_keywords
+        for keyword in SEAFOOD_MENU_KEYWORDS
     ):
         themes.add("SEAFOOD")
 
@@ -316,7 +416,23 @@ def enrich_food_themes(
 
 def convert_to_course_place(
     place: dict,
+    detail_cache: TourApiDetailCache | None = None,
 ) -> dict:
+
+    food_detail = {}
+    content_type_id = str(
+        place.get("contenttypeid", "")
+    )
+    content_id = place.get(
+        "contentid"
+    )
+
+    if content_type_id == "39" and content_id:
+        food_detail = search_food_detail(
+            content_id,
+            detail_cache=detail_cache,
+            content_type_id=content_type_id,
+        )
 
     themes = infer_place_themes(
         place
@@ -325,6 +441,8 @@ def convert_to_course_place(
     themes = enrich_food_themes(
         place,
         themes,
+        detail_cache=detail_cache,
+        detail=food_detail,
     )
 
     latitude = parse_optional_float(
@@ -347,6 +465,7 @@ def convert_to_course_place(
         "themes": themes,
 
         "raw": place,
+        "_foodDetail": food_detail,
     }
 
 def filter_course_candidates(
@@ -455,6 +574,7 @@ def is_open_now(
 def is_food_open(
     place: dict,
     current_time: datetime,
+    detail_cache: TourApiDetailCache | None = None,
 ) -> bool:
 
     if str(
@@ -464,7 +584,9 @@ def is_food_open(
 
 
     detail = search_food_detail(
-        place.get("contentid")
+        place.get("contentid"),
+        detail_cache=detail_cache,
+        content_type_id=str(place.get("contenttypeid", "39")),
     )
 
 
@@ -483,6 +605,7 @@ def is_food_open(
 def filter_open_places(
     places: list[dict],
     current_datetime: datetime,
+    detail_cache: TourApiDetailCache | None = None,
 ) -> list[dict]:
     """
     현재 영업 가능한 장소만 반환
@@ -495,6 +618,7 @@ def filter_open_places(
         if is_food_open(
             place,
             current_datetime,
+            detail_cache=detail_cache,
         ):
             result.append(place)
 
@@ -505,6 +629,7 @@ def is_course_place_open_for_visit(
     place: dict,
     arrival_at: datetime,
     departure_at: datetime,
+    detail_cache: TourApiDetailCache | None = None,
 ) -> bool:
     if str(
         place.get("contentTypeId")
@@ -519,7 +644,9 @@ def is_course_place_open_for_visit(
         return True
 
     detail = search_food_detail(
-        content_id
+        content_id,
+        detail_cache=detail_cache,
+        content_type_id=str(place.get("contentTypeId", "39")),
     )
 
     open_time = detail.get(

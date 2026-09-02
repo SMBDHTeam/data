@@ -17,6 +17,36 @@ MIN_STAY_MINUTES = 60
 log = logging.getLogger("data.spontaneous.routing")
 
 
+class RoutingApiError(RuntimeError):
+    def __init__(
+        self,
+        provider: str,
+        detail: str,
+        status_code: int = 502,
+    ):
+        super().__init__(detail)
+        self.provider = provider
+        self.detail = detail
+        self.status_code = status_code
+
+
+TravelMinutesCache = dict[tuple[str, float, float, float, float], int | None]
+
+
+def travel_cache_key(
+    mode: TransportMode,
+    origin: Coordinate,
+    destination: Coordinate,
+) -> tuple[str, float, float, float, float]:
+    return (
+        mode.value,
+        round(origin.latitude, 6),
+        round(origin.longitude, 6),
+        round(destination.latitude, 6),
+        round(destination.longitude, 6),
+    )
+
+
 def parse_route_minutes(value) -> int | None:
     try:
         minutes = int(value)
@@ -28,6 +58,53 @@ def parse_route_minutes(value) -> int | None:
 
     return minutes
 
+
+def parse_odsay_error(payload: dict) -> tuple[str, int] | None:
+    errors = payload.get("error")
+
+    if isinstance(errors, dict):
+        errors = [errors]
+
+    if not isinstance(errors, list) or not errors:
+        return None
+
+    first_error = errors[0]
+
+    if not isinstance(first_error, dict):
+        return ("EXTERNAL_ROUTING_API_ERROR", 502)
+
+    code = str(first_error.get("code", "")).strip()
+    message = str(first_error.get("message", ""))
+    message_lower = message.lower()
+
+    if code == "429" or "quota" in message_lower:
+        return ("ODSAY_QUOTA_EXCEEDED", 429)
+
+    if (
+        "auth" in message_lower
+        or "authentication" in message_lower
+        or "apikey" in message_lower
+    ):
+        return ("ODSAY_AUTH_FAILED", 401)
+
+    return ("EXTERNAL_ROUTING_API_ERROR", 502)
+
+
+def raise_odsay_error(
+    detail: str,
+    status_code: int,
+) -> None:
+    log.warning(
+        "routing provider=ODsay status=%s",
+        detail.lower(),
+    )
+    raise RoutingApiError(
+        provider="ODsay",
+        detail=detail,
+        status_code=status_code,
+    )
+
+
 def search_public_transit_minutes(
     origin: Coordinate,
     destination: Coordinate,
@@ -35,8 +112,17 @@ def search_public_transit_minutes(
     enabled = os.getenv("ODSAY_ENABLED", "false").lower() == "true"
     api_key = os.getenv("ODSAY_API_KEY", "").strip()
 
-    if not enabled or not api_key:
-        return None
+    if not enabled:
+        raise_odsay_error(
+            "EXTERNAL_ROUTING_API_ERROR",
+            503,
+        )
+
+    if not api_key:
+        raise_odsay_error(
+            "ODSAY_AUTH_FAILED",
+            401,
+        )
 
     base_url = os.getenv(
         "ODSAY_BASE_URL",
@@ -69,47 +155,95 @@ def search_public_transit_minutes(
             )
 
     except HTTPError as exc:
-        log.warning(
-            "ODsay HTTP error. status=%s reason=%s",
-            exc.code,
-            exc.reason,
-        )
-
+        detail = "EXTERNAL_ROUTING_API_ERROR"
+        status_code = 502
         try:
             error_body = exc.read().decode("utf-8")
-            log.debug("ODsay error body: %s", error_body)
+            payload = json.loads(error_body)
+            parsed_error = parse_odsay_error(payload)
+            if parsed_error:
+                detail, status_code = parsed_error
         except Exception:
             pass
 
-        return None
+        if exc.code == 429:
+            detail = "ODSAY_QUOTA_EXCEEDED"
+            status_code = 429
+
+        raise_odsay_error(
+            detail,
+            status_code,
+        )
 
     except URLError as exc:
-        log.warning("ODsay URL error. error=%r", exc)
-        return None
+        log.warning(
+            "routing provider=ODsay status=external_error error=%r",
+            exc,
+        )
+        raise RoutingApiError(
+            provider="ODsay",
+            detail="EXTERNAL_ROUTING_API_ERROR",
+            status_code=502,
+        ) from exc
 
     except TimeoutError as exc:
-        log.warning("ODsay timeout. error=%r", exc)
-        return None
+        log.warning(
+            "routing provider=ODsay status=external_error error=%r",
+            exc,
+        )
+        raise RoutingApiError(
+            provider="ODsay",
+            detail="EXTERNAL_ROUTING_API_ERROR",
+            status_code=502,
+        ) from exc
 
     except json.JSONDecodeError as exc:
-        log.warning("ODsay JSON decode error. error=%r", exc)
-        return None
+        log.warning(
+            "routing provider=ODsay status=external_error error=%r",
+            exc,
+        )
+        raise RoutingApiError(
+            provider="ODsay",
+            detail="EXTERNAL_ROUTING_API_ERROR",
+            status_code=502,
+        ) from exc
 
     except Exception as exc:
-        log.warning("ODsay unknown error. error=%r", exc)
-        return None
+        log.warning(
+            "routing provider=ODsay status=external_error error=%r",
+            exc,
+        )
+        raise RoutingApiError(
+            provider="ODsay",
+            detail="EXTERNAL_ROUTING_API_ERROR",
+            status_code=502,
+        ) from exc
 
     if not isinstance(payload, dict):
-        return None
+        raise_odsay_error(
+            "EXTERNAL_ROUTING_API_ERROR",
+            502,
+        )
 
     if "error" in payload:
-        log.info("ODsay route error response. error=%s", payload.get("error"))
-        return None
+        parsed_error = parse_odsay_error(payload)
+
+        if parsed_error:
+            detail, status_code = parsed_error
+        else:
+            detail = "EXTERNAL_ROUTING_API_ERROR"
+            status_code = 502
+
+        raise_odsay_error(
+            detail,
+            status_code,
+        )
 
     result = payload.get("result", {})
     paths = result.get("path", [])
 
     if not paths:
+        log.info("routing provider=ODsay status=no_route")
         return None
 
     valid_minutes: list[int] = []
@@ -124,9 +258,14 @@ def search_public_transit_minutes(
             valid_minutes.append(total_time)
 
     if not valid_minutes:
+        log.info("routing provider=ODsay status=no_route")
         return None
 
 
+    log.info(
+        "routing provider=ODsay status=success minutes=%s",
+        min(valid_minutes),
+    )
     return min(valid_minutes)
 
 
@@ -188,11 +327,13 @@ def search_walking_minutes(
         TimeoutError,
         json.JSONDecodeError,
     ):
+        log.warning("routing provider=TMAP status=external_error mode=WALK")
         return None
 
     features = result.get("features", [])
 
     if not features:
+        log.info("routing provider=TMAP status=no_route mode=WALK")
         return None
 
     total_seconds = None
@@ -205,12 +346,18 @@ def search_walking_minutes(
             break
 
     if not isinstance(total_seconds, int):
+        log.info("routing provider=TMAP status=no_route mode=WALK")
         return None
 
-    return max(
+    minutes = max(
         1,
         (total_seconds + 59) // 60,
     )
+    log.info(
+        "routing provider=TMAP status=success mode=WALK minutes=%s",
+        minutes,
+    )
+    return minutes
 
 
 def search_car_minutes(
@@ -265,11 +412,13 @@ def search_car_minutes(
         TimeoutError,
         json.JSONDecodeError,
     ):
+        log.warning("routing provider=TMAP status=external_error mode=CAR")
         return None
 
     features = result.get("features", [])
 
     if not features:
+        log.info("routing provider=TMAP status=no_route mode=CAR")
         return None
 
     total_seconds = None
@@ -282,44 +431,67 @@ def search_car_minutes(
             break
 
     if not isinstance(total_seconds, int):
+        log.info("routing provider=TMAP status=no_route mode=CAR")
         return None
 
 
-    return max(
+    minutes = max(
         1,
         (total_seconds + 59) // 60,
     )
+    log.info(
+        "routing provider=TMAP status=success mode=CAR minutes=%s",
+        minutes,
+    )
+    return minutes
 
 
 def search_travel_minutes(
     mode: TransportMode,
     origin: Coordinate,
     destination: Coordinate,
+    cache: TravelMinutesCache | None = None,
 ) -> int | None:
     """
     이동수단에 따라 실제 이동시간 조회 함수를 선택한다.
     """
 
+    cache_key = travel_cache_key(
+        mode,
+        origin,
+        destination,
+    )
+
+    if cache is not None and cache_key in cache:
+        log.info(
+            "routing provider=cache status=hit mode=%s",
+            mode.value,
+        )
+        return cache[cache_key]
+
     if mode == TransportMode.PUBLIC_TRANSIT:
-        return search_public_transit_minutes(
+        minutes = search_public_transit_minutes(
             origin,
             destination,
         )
-
-    if mode == TransportMode.WALK:
-        return search_walking_minutes(
+    elif mode == TransportMode.WALK:
+        minutes = search_walking_minutes(
             origin,
             destination,
         )
-
-    if mode == TransportMode.CAR:
-        return search_car_minutes(
+    elif mode == TransportMode.CAR:
+        minutes = search_car_minutes(
             origin,
             destination,
         )
+    else:
+        # BICYCLE은 아직 미구현
+        minutes = None
 
-    # BICYCLE은 아직 미구현
-    return None
+    if cache is not None:
+        cache[cache_key] = minutes
+
+    return minutes
 
 
 
@@ -329,6 +501,7 @@ def get_transport_options(
     destination: Coordinate,
     start_at: datetime,
     return_by: datetime,
+    cache: TravelMinutesCache | None = None,
 ) -> list[TransportOption]:
 
     options: list[TransportOption] = []
@@ -339,15 +512,26 @@ def get_transport_options(
     )
 
 
-    public_transit_minutes = search_public_transit_minutes(
-        origin,
-        destination,
-    )
+    public_transit_error = None
 
-    public_transit_return_minutes = search_public_transit_minutes(
-        destination,
-        origin,
-    )
+    try:
+        public_transit_minutes = search_travel_minutes(
+            TransportMode.PUBLIC_TRANSIT,
+            origin,
+            destination,
+            cache=cache,
+        )
+
+        public_transit_return_minutes = search_travel_minutes(
+            TransportMode.PUBLIC_TRANSIT,
+            destination,
+            origin,
+            cache=cache,
+        )
+    except RoutingApiError as exc:
+        public_transit_minutes = None
+        public_transit_return_minutes = None
+        public_transit_error = exc.detail
 
     if (
         public_transit_minutes is not None
@@ -388,20 +572,24 @@ def get_transport_options(
             TransportOption(
                 mode=TransportMode.PUBLIC_TRANSIT,
                 available=False,
-                unavailableReason="NO_ROUTE",
+                unavailableReason=public_transit_error or "NO_ROUTE",
             )
         )
 
    
 
-    walking_minutes = search_walking_minutes(
+    walking_minutes = search_travel_minutes(
+        TransportMode.WALK,
         origin,
         destination,
+        cache=cache,
     )
 
-    walking_return_minutes = search_walking_minutes(
+    walking_return_minutes = search_travel_minutes(
+        TransportMode.WALK,
         destination,
         origin,
+        cache=cache,
     )
 
     if (
@@ -458,14 +646,18 @@ def get_transport_options(
 
    
 
-    car_minutes = search_car_minutes(
+    car_minutes = search_travel_minutes(
+        TransportMode.CAR,
         origin,
         destination,
+        cache=cache,
     )
 
-    car_return_minutes = search_car_minutes(
+    car_return_minutes = search_travel_minutes(
+        TransportMode.CAR,
         destination,
         origin,
+        cache=cache,
     )
 
     if (
@@ -517,14 +709,14 @@ def get_travel_minutes_for_mode(
     origin: Coordinate,
     destination: Coordinate,
     mode: TransportMode,
+    cache: TravelMinutesCache | None = None,
 ) -> int | None:
-    if mode == TransportMode.PUBLIC_TRANSIT:
-        return search_public_transit_minutes(origin, destination)
-    if mode == TransportMode.WALK:
-        return search_walking_minutes(origin, destination)
-    if mode == TransportMode.CAR:
-        return search_car_minutes(origin, destination)
-    return None
+    return search_travel_minutes(
+        mode,
+        origin,
+        destination,
+        cache=cache,
+    )
 
 
 def get_best_travel_minutes(

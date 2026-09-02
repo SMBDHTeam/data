@@ -3,10 +3,53 @@ from typing import Set
 from math import asin, cos, radians, sin, sqrt
 
 from spontaneous.models import Coordinate, TransportMode
-from spontaneous.routing import search_travel_minutes
+from spontaneous.places import SEAFOOD_MENU_KEYWORDS
+from spontaneous.routing import TravelMinutesCache, search_travel_minutes
 
 
 EARTH_RADIUS_METERS = 6371000
+PLACE_SCORE_THEME_WEIGHT = 0.35
+PLACE_SCORE_TYPE_WEIGHT = 0.15
+PLACE_SCORE_MENU_RELEVANCE_WEIGHT = 0.30
+PLACE_SCORE_DISTANCE_WEIGHT = 0.20
+ROLE_STAY_MINUTES = {
+    "ACTIVITY": 60,
+    "MEAL": 90,
+    "CAFE": 60,
+    "NIGHT_VIEW": 40,
+}
+DEFAULT_ROLE_ORDER = [
+    "ACTIVITY",
+    "MEAL",
+    "CAFE",
+    "NIGHT_VIEW",
+]
+THEME_REQUIRED_ROLE_MAP = {
+    "SEA": {"ACTIVITY"},
+    "WALK": {"ACTIVITY"},
+    "NATURE": {"ACTIVITY"},
+    "CULTURE": {"ACTIVITY"},
+    "ACTIVITY": {"ACTIVITY"},
+    "HEALING": {"ACTIVITY"},
+    "SHOPPING": {"ACTIVITY"},
+    "SEAFOOD": {"MEAL"},
+    "FOOD": {"MEAL"},
+    "CAFE": {"CAFE"},
+    "NIGHT_VIEW": {"NIGHT_VIEW"},
+}
+COURSE_VERIFIABLE_THEMES = set(
+    THEME_REQUIRED_ROLE_MAP.keys()
+)
+ACTIVITY_ROLE_THEMES = {
+    "SEA",
+    "WALK",
+    "NATURE",
+    "CULTURE",
+    "ACTIVITY",
+    "HEALING",
+    "SHOPPING",
+}
+MIN_OPTIONAL_ROLE_BUFFER_MINUTES = 30
 
 
 def calculate_distance_meters(
@@ -97,7 +140,9 @@ def classify_place_role(
     if "NIGHT_VIEW" in place_themes:
         return "NIGHT_VIEW"
 
-    if "SEA" in place_themes or "WALK" in place_themes:
+    if ACTIVITY_ROLE_THEMES.intersection(
+        place_themes
+    ):
         return "ACTIVITY"
 
     return "ETC"
@@ -209,9 +254,8 @@ def calculate_place_type_score(
 
     if role == "ACTIVITY":
 
-        if (
-            "SEA" in themes
-            or "WALK" in themes
+        if ACTIVITY_ROLE_THEMES.intersection(
+            themes
         ):
             return 1.0
 
@@ -224,6 +268,86 @@ def calculate_place_type_score(
 
     return 0.0
 
+
+
+def get_place_themes(
+    place: dict,
+) -> set[str]:
+    return {
+        str(theme).upper()
+        for theme in place.get(
+            "themes",
+            set(),
+        )
+    }
+
+
+def count_keyword_matches(
+    text: str,
+    keywords: list[str],
+) -> int:
+    return len(
+        {
+            keyword
+            for keyword in keywords
+            if keyword in text
+        }
+    )
+
+
+def calculate_menu_relevance_score(
+    place: dict,
+    desired_themes: set[str],
+    role: str,
+) -> float:
+    if role != "MEAL":
+        return 0.0
+
+    if "SEAFOOD" not in desired_themes:
+        return 0.0
+
+    place_themes = get_place_themes(
+        place
+    )
+
+    if "SEAFOOD" not in place_themes:
+        return 0.0
+
+    detail = place.get(
+        "_foodDetail",
+        {},
+    ) or {}
+
+    firstmenu = str(
+        detail.get(
+            "firstmenu",
+            "",
+        )
+    )
+    treatmenu = str(
+        detail.get(
+            "treatmenu",
+            "",
+        )
+    )
+
+    firstmenu_matches = count_keyword_matches(
+        firstmenu,
+        SEAFOOD_MENU_KEYWORDS,
+    )
+    treatmenu_matches = count_keyword_matches(
+        treatmenu,
+        SEAFOOD_MENU_KEYWORDS,
+    )
+
+    if firstmenu_matches == 0 and treatmenu_matches == 0:
+        return 0.2
+
+    return min(
+        1.0,
+        firstmenu_matches * 0.45
+        + min(treatmenu_matches, 4) * 0.12,
+    )
 
 
 def calculate_place_score(
@@ -255,13 +379,21 @@ def calculate_place_score(
         distance
     )
 
+    menu_relevance_score = calculate_menu_relevance_score(
+        place,
+        desired_themes,
+        role,
+    )
+
 
     final_score = (
-        theme_score * 0.4
+        theme_score * PLACE_SCORE_THEME_WEIGHT
         +
-        type_score * 0.2
+        type_score * PLACE_SCORE_TYPE_WEIGHT
         +
-        distance_score * 0.4
+        menu_relevance_score * PLACE_SCORE_MENU_RELEVANCE_WEIGHT
+        +
+        distance_score * PLACE_SCORE_DISTANCE_WEIGHT
     )
 
 
@@ -274,6 +406,7 @@ def select_best_place(
     desired_themes: set[str],
     role: str,
     current_location,
+    required_themes: set[str] | None = None,
 ) -> dict | None:
     """
     역할별 후보 중
@@ -283,9 +416,34 @@ def select_best_place(
     if not places:
         return None
 
+    candidates = places
+    required_themes = required_themes or set()
+
+    if required_themes:
+        fully_matched = [
+            place
+            for place in places
+            if required_themes.issubset(
+                get_place_themes(place)
+            )
+        ]
+
+        if fully_matched:
+            candidates = fully_matched
+        else:
+            partially_matched = [
+                place
+                for place in places
+                if required_themes.intersection(
+                    get_place_themes(place)
+                )
+            ]
+
+            if partially_matched:
+                candidates = partially_matched
 
     return max(
-        places,
+        candidates,
         key=lambda place:
             calculate_place_score(
                 place,
@@ -296,25 +454,176 @@ def select_best_place(
     )
 
 
+def get_required_roles(
+    desired_themes: set[str],
+) -> set[str]:
+    roles: set[str] = set()
+
+    for theme in desired_themes:
+        roles.update(
+            THEME_REQUIRED_ROLE_MAP.get(
+                theme.upper(),
+                set(),
+            )
+        )
+
+    return roles
+
+
+def get_verifiable_requested_themes(
+    desired_themes: set[str],
+) -> set[str]:
+    return {
+        theme.upper()
+        for theme in desired_themes
+        if theme.upper() in COURSE_VERIFIABLE_THEMES
+    }
+
+
+def get_required_themes_by_role(
+    desired_themes: set[str],
+) -> dict[str, set[str]]:
+    themes_by_role: dict[str, set[str]] = {}
+
+    for theme in get_verifiable_requested_themes(
+        desired_themes
+    ):
+        roles = THEME_REQUIRED_ROLE_MAP.get(
+            theme,
+            set(),
+        )
+
+        for role in DEFAULT_ROLE_ORDER:
+            if role in roles:
+                themes_by_role.setdefault(
+                    role,
+                    set(),
+                ).add(theme)
+                break
+
+    return themes_by_role
+
+
+def build_course_role_plan(
+    desired_themes: set[str],
+    available_minutes: int | None = None,
+) -> list[tuple[str, int]]:
+    required_roles = get_required_roles(
+        desired_themes
+    )
+    plan: list[tuple[str, int]] = []
+    planned_roles: set[str] = set()
+    remaining_minutes = available_minutes
+
+    def append_role(
+        role: str,
+        required: bool,
+    ) -> None:
+        nonlocal remaining_minutes
+
+        if role in planned_roles:
+            return
+
+        stay_minutes = ROLE_STAY_MINUTES[role]
+
+        if (
+            not required
+            and remaining_minutes is not None
+            and remaining_minutes
+            < stay_minutes + MIN_OPTIONAL_ROLE_BUFFER_MINUTES
+        ):
+            return
+
+        plan.append(
+            (
+                role,
+                stay_minutes,
+            )
+        )
+        planned_roles.add(role)
+
+        if remaining_minutes is not None:
+            remaining_minutes -= stay_minutes
+
+    for role in DEFAULT_ROLE_ORDER:
+        if role in required_roles:
+            append_role(
+                role,
+                required=True,
+            )
+
+    for role in DEFAULT_ROLE_ORDER:
+        if role not in required_roles:
+            append_role(
+                role,
+                required=False,
+            )
+
+    return plan
+
+
+def has_required_course_roles(
+    course: list[dict],
+    required_roles: set[str],
+) -> bool:
+    selected_roles = {
+        item.get("role")
+        for item in course
+    }
+
+    return required_roles.issubset(
+        selected_roles
+    )
+
+
+def get_course_themes(
+    course: list[dict],
+) -> set[str]:
+    course_themes: set[str] = set()
+
+    for item in course:
+        course_themes.update(
+            get_place_themes(item)
+        )
+
+    return course_themes
+
+
+def get_missing_required_themes(
+    course: list[dict],
+    desired_themes: set[str],
+) -> set[str]:
+    required_themes = get_verifiable_requested_themes(
+        desired_themes
+    )
+
+    return required_themes - get_course_themes(
+        course
+    )
+
+
+def has_required_theme_coverage(
+    course: list[dict],
+    desired_themes: set[str],
+) -> bool:
+    return not get_missing_required_themes(
+        course,
+        desired_themes,
+    )
+
+
 
 def generate_course(
     grouped_places: dict[str, list[dict]],
     desired_themes: set[str],
     current_location,
+    role_plan: list[tuple[str, int]] | None = None,
+    required_themes_by_role: dict[str, set[str]] | None = None,
 ) -> list[dict]:
     """
     코스 생성
 
-    기본 패턴:
-
-    ACTIVITY
-        ↓
-    MEAL
-        ↓
-    CAFE
-        ↓
-    NIGHT_VIEW
-
+    desired theme로 만든 role plan 순서에 따라 stop을 선택한다.
     """
 
     course = []
@@ -329,12 +638,16 @@ def generate_course(
         cursor_location = dict(current_location)
 
 
-    patterns = [
-        ("ACTIVITY", 60),
-        ("MEAL", 90),
-        ("CAFE", 60),
-        ("NIGHT_VIEW", 40),
-    ]
+    if role_plan is None:
+        patterns = [
+            (
+                role,
+                ROLE_STAY_MINUTES[role],
+            )
+            for role in DEFAULT_ROLE_ORDER
+        ]
+    else:
+        patterns = role_plan
 
 
     for role, stay_minutes in patterns:
@@ -353,6 +666,12 @@ def generate_course(
             desired_themes,
             role,
             cursor_location,
+            required_themes=(
+                required_themes_by_role or {}
+            ).get(
+                role,
+                set(),
+            ),
         )
 
 
@@ -409,6 +728,7 @@ def calculate_course_travel_minutes(
     course: list[dict],
     current_location: Coordinate,
     transport_mode: TransportMode,
+    cache: TravelMinutesCache | None = None,
 ) -> list[dict]:
     """
     현재 위치 -> 장소1 -> 장소2 -> ... -> 현재 위치
@@ -432,6 +752,7 @@ def calculate_course_travel_minutes(
             transport_mode,
             previous_location,
             place_location,
+            cache=cache,
         )
 
         item_with_travel = {
@@ -447,6 +768,7 @@ def calculate_course_travel_minutes(
         transport_mode,
         previous_location,
         current_location,
+        cache=cache,
     )
 
     if result:

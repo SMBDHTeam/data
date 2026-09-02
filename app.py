@@ -65,6 +65,7 @@ from spontaneous.service import (
 )
 
 from spontaneous.routing import (
+    RoutingApiError,
     get_transport_options,
     get_best_travel_minutes,
     get_best_stay_minutes,
@@ -80,10 +81,15 @@ from spontaneous.places import (
 
 from spontaneous.course import (
     group_places_by_role,
+    build_course_role_plan,
+    get_required_roles,
+    get_required_themes_by_role,
     generate_course,
     calculate_course_travel_minutes,
     apply_course_timeline,
     has_complete_travel_minutes,
+    has_required_course_roles,
+    has_required_theme_coverage,
     normalize_course_orders,
     public_course_stop,
 )
@@ -582,6 +588,8 @@ def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
 ) -> SpontaneousDestinationResponse:
     candidates = []
+    routing_cache = {}
+
     for zone in DESTINATION_ZONES:
         final_score, theme_score, distance = calculate_destination_score(
             zone,
@@ -615,6 +623,7 @@ def recommend_spontaneous_destinations(
             destination,
             request.startAt,
             request.returnBy,
+            cache=routing_cache,
         )
 
         has_available_transport = any(
@@ -708,6 +717,7 @@ def create_spontaneous_course(
         ) from exc
 
     before_count = len(places)
+    detail_cache = {}
 
 
     # 2. 코스 가능한 장소만
@@ -720,6 +730,7 @@ def create_spontaneous_course(
     places = filter_open_places(
         places,
         request.startAt,
+        detail_cache=detail_cache,
     )
 
     after_count = len(places)
@@ -732,7 +743,10 @@ def create_spontaneous_course(
         )
 
     course_places = [
-        convert_to_course_place(place)
+        convert_to_course_place(
+            place,
+            detail_cache=detail_cache,
+        )
         for place in places
     ]
 
@@ -741,25 +755,75 @@ def create_spontaneous_course(
         course_places
     )
 
+    desired_themes = {
+        theme.upper()
+        for theme in request.desiredThemes
+    }
+    available_minutes = int(
+        (request.returnBy - request.startAt).total_seconds() // 60
+    )
+    required_roles = get_required_roles(
+        desired_themes
+    )
+    required_themes_by_role = get_required_themes_by_role(
+        desired_themes
+    )
+    role_plan = build_course_role_plan(
+        desired_themes,
+        available_minutes,
+    )
 
     course = generate_course(
         grouped_places,
-        set(request.desiredThemes),
+        desired_themes,
         request.currentLocation,
+        role_plan=role_plan,
+        required_themes_by_role=required_themes_by_role,
     )
 
-    if not course:
+    if (
+        not course
+        or not has_required_course_roles(
+            course,
+            required_roles,
+        )
+        or not has_required_theme_coverage(
+            course,
+            desired_themes,
+        )
+    ):
         raise HTTPException(
             status_code=422,
             detail="COURSE_NOT_FEASIBLE",
         )
 
+    routing_cache = {}
+
     while course:
-        course = calculate_course_travel_minutes(
+        if not has_required_course_roles(
             course,
-            request.currentLocation,
-            request.transportMode,
-        )
+            required_roles,
+        ) or not has_required_theme_coverage(
+            course,
+            desired_themes,
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="COURSE_NOT_FEASIBLE",
+            )
+
+        try:
+            course = calculate_course_travel_minutes(
+                course,
+                request.currentLocation,
+                request.transportMode,
+                cache=routing_cache,
+            )
+        except RoutingApiError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+            ) from exc
 
         if not has_complete_travel_minutes(
             course
@@ -796,6 +860,7 @@ def create_spontaneous_course(
                 stop,
                 arrival_at,
                 departure_at,
+                detail_cache=detail_cache,
             ):
                 invalid_stop_index = index
                 break

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from datetime import datetime
 
@@ -13,6 +14,19 @@ from spontaneous.models import (
 )
 
 MIN_STAY_MINUTES = 60
+log = logging.getLogger("data.spontaneous.routing")
+
+
+def parse_route_minutes(value) -> int | None:
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    if minutes <= 0:
+        return None
+
+    return minutes
 
 def search_public_transit_minutes(
     origin: Coordinate,
@@ -53,15 +67,43 @@ def search_public_transit_minutes(
             payload = json.loads(
                 response.read().decode("utf-8")
             )
-    except (
-        HTTPError,
-        URLError,
-        TimeoutError,
-        json.JSONDecodeError,
-    ):
+
+    except HTTPError as exc:
+        log.warning(
+            "ODsay HTTP error. status=%s reason=%s",
+            exc.code,
+            exc.reason,
+        )
+
+        try:
+            error_body = exc.read().decode("utf-8")
+            log.debug("ODsay error body: %s", error_body)
+        except Exception:
+            pass
+
         return None
 
-    if not isinstance(payload, dict) or "error" in payload:
+    except URLError as exc:
+        log.warning("ODsay URL error. error=%r", exc)
+        return None
+
+    except TimeoutError as exc:
+        log.warning("ODsay timeout. error=%r", exc)
+        return None
+
+    except json.JSONDecodeError as exc:
+        log.warning("ODsay JSON decode error. error=%r", exc)
+        return None
+
+    except Exception as exc:
+        log.warning("ODsay unknown error. error=%r", exc)
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    if "error" in payload:
+        log.info("ODsay route error response. error=%s", payload.get("error"))
         return None
 
     result = payload.get("result", {})
@@ -74,9 +116,11 @@ def search_public_transit_minutes(
 
     for path in paths:
         info = path.get("info", {})
-        total_time = info.get("totalTime")
+        total_time = parse_route_minutes(
+            info.get("totalTime")
+        )
 
-        if isinstance(total_time, int):
+        if total_time is not None:
             valid_minutes.append(total_time)
 
     if not valid_minutes:
@@ -245,6 +289,38 @@ def search_car_minutes(
         1,
         (total_seconds + 59) // 60,
     )
+
+
+def search_travel_minutes(
+    mode: TransportMode,
+    origin: Coordinate,
+    destination: Coordinate,
+) -> int | None:
+    """
+    이동수단에 따라 실제 이동시간 조회 함수를 선택한다.
+    """
+
+    if mode == TransportMode.PUBLIC_TRANSIT:
+        return search_public_transit_minutes(
+            origin,
+            destination,
+        )
+
+    if mode == TransportMode.WALK:
+        return search_walking_minutes(
+            origin,
+            destination,
+        )
+
+    if mode == TransportMode.CAR:
+        return search_car_minutes(
+            origin,
+            destination,
+        )
+
+    # BICYCLE은 아직 미구현
+    return None
+
 
 
 

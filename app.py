@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -55,9 +56,14 @@ from spontaneous.models import (
     Coordinate,
     SpontaneousDestinationRequest,
     SpontaneousDestinationResponse,
+    SpontaneousCourseRequest,
+    TransportMode,
 )
 
-from spontaneous.destinations import DESTINATION_ZONES
+from spontaneous.destinations import (
+    DESTINATION_ZONES,
+    find_destination_zone,
+)
 
 from spontaneous.service import (
     calculate_destination_score,
@@ -70,8 +76,23 @@ from spontaneous.routing import (
     get_best_stay_minutes,
 )
 
-from spontaneous.models import SpontaneousCourseRequest
-from spontaneous.destinations import find_destination_zone
+from spontaneous.places import (
+    search_places_by_zone,
+    filter_course_candidates,
+    filter_open_places,
+    convert_to_course_place,
+    is_course_place_open_for_visit,
+)
+
+from spontaneous.course import (
+    group_places_by_role,
+    generate_course,
+    calculate_course_travel_minutes,
+    apply_course_timeline,
+    has_complete_travel_minutes,
+    normalize_course_orders,
+    public_course_stop,
+)
 # -------
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -656,6 +677,18 @@ def recommend_spontaneous_destinations(
 def create_spontaneous_course(
     request: SpontaneousCourseRequest,
 ):
+    if request.returnBy <= request.startAt:
+        raise HTTPException(
+            status_code=422,
+            detail="COURSE_NOT_FEASIBLE",
+        )
+
+    if request.transportMode == TransportMode.BICYCLE:
+        raise HTTPException(
+            status_code=422,
+            detail="UNSUPPORTED_TRANSPORT_MODE",
+        )
+
     zone = find_destination_zone(
         request.destinationId
     )
@@ -666,10 +699,153 @@ def create_spontaneous_course(
             detail="DESTINATION_NOT_FOUND",
         )
 
-    return {
-        "destinationId": zone.destination_id,
-        "name": zone.name,
-        "transportMode": request.transportMode,
-        "message": "course generation ready",
-    }
+
+    # 1. 목적지 장소 조회
+    try:
+        places = search_places_by_zone(
+            zone
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="TOUR_API_ERROR",
+        ) from exc
+
+    before_count = len(places)
+
+
+    # 2. 코스 가능한 장소만
+    places = filter_course_candidates(
+        places
+    )
+
+
+    # 3. 운영시간 필터
+    places = filter_open_places(
+        places,
+        request.startAt,
+    )
+
+    after_count = len(places)
+
+
+    if not places:
+        raise HTTPException(
+            status_code=422,
+            detail="COURSE_NOT_FEASIBLE",
+        )
+
+    course_places = [
+        convert_to_course_place(place)
+        for place in places
+    ]
+
+
+    grouped_places = group_places_by_role(
+        course_places
+    )
+
+
+    course = generate_course(
+        grouped_places,
+        set(request.desiredThemes),
+        request.currentLocation,
+    )
+
+    if not course:
+        raise HTTPException(
+            status_code=422,
+            detail="COURSE_NOT_FEASIBLE",
+        )
+
+    while course:
+        course = calculate_course_travel_minutes(
+            course,
+            request.currentLocation,
+            request.transportMode,
+        )
+
+        if not has_complete_travel_minutes(
+            course
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="NO_ROUTE",
+            )
+
+        try:
+            timeline = apply_course_timeline(
+                course,
+                request.startAt,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=str(exc),
+            ) from exc
+
+        invalid_stop_index = None
+
+        for index, stop in enumerate(
+            timeline["course"]
+        ):
+            arrival_at = datetime.fromisoformat(
+                stop["arrivalAt"]
+            )
+            departure_at = datetime.fromisoformat(
+                stop["departureAt"]
+            )
+
+            if not is_course_place_open_for_visit(
+                stop,
+                arrival_at,
+                departure_at,
+            ):
+                invalid_stop_index = index
+                break
+
+        if invalid_stop_index is not None:
+            course = normalize_course_orders(
+                course[:invalid_stop_index]
+                + course[invalid_stop_index + 1:]
+            )
+            continue
+
+        estimated_return_at = timeline[
+            "estimatedReturnAt"
+        ]
+
+        if estimated_return_at <= request.returnBy:
+            return {
+                "destinationId": zone.destination_id,
+                "name": zone.name,
+                "transportMode": request.transportMode.value,
+                "course": [
+                    public_course_stop(stop)
+                    for stop in timeline["course"]
+                ],
+                "returnTravelMinutes": timeline[
+                    "returnTravelMinutes"
+                ],
+                "estimatedReturnAt": estimated_return_at.isoformat(),
+                "returnBy": request.returnBy.isoformat(),
+                "candidateCounts": {
+                    "searched": before_count,
+                    "open": after_count,
+                },
+            }
+
+        course = normalize_course_orders(
+            course[:-1]
+        )
+
+    raise HTTPException(
+        status_code=422,
+        detail="COURSE_NOT_FEASIBLE",
+    )
 # -------

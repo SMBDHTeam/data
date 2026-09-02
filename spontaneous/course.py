@@ -1,7 +1,9 @@
+from datetime import datetime, timedelta
 from typing import Set
 from math import asin, cos, radians, sin, sqrt
 
-
+from spontaneous.models import Coordinate, TransportMode
+from spontaneous.routing import search_travel_minutes
 
 
 EARTH_RADIUS_METERS = 6371000
@@ -15,21 +17,20 @@ def calculate_distance_meters(
     두 좌표 거리 계산
     """
 
-    lat1 = radians(
-        origin["latitude"]
-    )
+    if hasattr(origin, "latitude"):
+        lat1 = radians(origin.latitude)
+        lon1 = radians(origin.longitude)
+    else:
+        lat1 = radians(origin["latitude"])
+        lon1 = radians(origin["longitude"])
 
-    lon1 = radians(
-        origin["longitude"]
-    )
 
-    lat2 = radians(
-        destination["latitude"]
-    )
-
-    lon2 = radians(
-        destination["longitude"]
-    )
+    if hasattr(destination, "latitude"):
+        lat2 = radians(destination.latitude)
+        lon2 = radians(destination.longitude)
+    else:
+        lat2 = radians(destination["latitude"])
+        lon2 = radians(destination["longitude"])
 
 
     delta_lat = lat2 - lat1
@@ -166,6 +167,8 @@ def calculate_theme_score(
     if not place_themes:
         return 0.0
 
+    if not desired_themes:
+        return 0.0
 
     matched = desired_themes.intersection(
         place_themes
@@ -358,6 +361,11 @@ def generate_course(
                     selected.get("name")
                     or selected.get("title"),
 
+                "latitude": selected.get("latitude"),
+                "longitude": selected.get("longitude"),
+                "contentId": selected.get("contentId"),
+                "contentTypeId": selected.get("contentTypeId"),
+
                 "stayMinutes": stay_minutes,
 
                 "themes": list(
@@ -385,3 +393,141 @@ def generate_course(
 
 
     return course
+
+def calculate_course_travel_minutes(
+    course: list[dict],
+    current_location: Coordinate,
+    transport_mode: TransportMode,
+) -> list[dict]:
+    """
+    현재 위치 -> 장소1 -> 장소2 -> ... -> 현재 위치
+    각 구간의 실제 이동시간을 계산한다.
+    """
+
+    if not course:
+        return []
+
+    result = []
+
+    previous_location = current_location
+
+    for item in course:
+        place_location = Coordinate(
+            latitude=item["latitude"],
+            longitude=item["longitude"],
+        )
+
+        travel_minutes = search_travel_minutes(
+            transport_mode,
+            previous_location,
+            place_location,
+        )
+
+        item_with_travel = {
+            **item,
+            "travelMinutesFromPrevious": travel_minutes,
+        }
+
+        result.append(item_with_travel)
+
+        previous_location = place_location
+
+    return_minutes = search_travel_minutes(
+        transport_mode,
+        previous_location,
+        current_location,
+    )
+
+    if result:
+        result[-1]["returnTravelMinutes"] = return_minutes
+
+    return result
+
+
+def has_complete_travel_minutes(
+    course: list[dict],
+) -> bool:
+    if not course:
+        return False
+
+    for item in course:
+        if item.get("travelMinutesFromPrevious") is None:
+            return False
+
+    return course[-1].get("returnTravelMinutes") is not None
+
+
+def apply_course_timeline(
+    course: list[dict],
+    start_at: datetime,
+) -> dict:
+    """
+    Adds arrival/departure timestamps and computes the final return time.
+    """
+
+    current_time = start_at
+    timeline = []
+
+    for item in course:
+        travel_minutes = item.get(
+            "travelMinutesFromPrevious"
+        )
+
+        if travel_minutes is None:
+            raise ValueError("NO_ROUTE")
+
+        arrival_at = current_time + timedelta(
+            minutes=travel_minutes
+        )
+
+        departure_at = arrival_at + timedelta(
+            minutes=item["stayMinutes"]
+        )
+
+        item_with_timeline = {
+            **item,
+            "arrivalAt": arrival_at.isoformat(),
+            "departureAt": departure_at.isoformat(),
+        }
+
+        timeline.append(item_with_timeline)
+        current_time = departure_at
+
+    return_travel_minutes = timeline[-1].get(
+        "returnTravelMinutes"
+    )
+
+    if return_travel_minutes is None:
+        raise ValueError("NO_ROUTE")
+
+    estimated_return_at = current_time + timedelta(
+        minutes=return_travel_minutes
+    )
+
+    return {
+        "course": timeline,
+        "returnTravelMinutes": return_travel_minutes,
+        "estimatedReturnAt": estimated_return_at,
+    }
+
+
+def normalize_course_orders(
+    course: list[dict],
+) -> list[dict]:
+    return [
+        {
+            **item,
+            "order": index + 1,
+        }
+        for index, item in enumerate(course)
+    ]
+
+
+def public_course_stop(
+    stop: dict,
+) -> dict:
+    return {
+        key: value
+        for key, value in stop.items()
+        if key != "raw" and not key.startswith("_")
+    }

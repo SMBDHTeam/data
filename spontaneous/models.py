@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 class TransportMode(str, Enum):
     PUBLIC_TRANSIT = "PUBLIC_TRANSIT"
     WALK = "WALK"
-    BICYCLE = "BICYCLE"
     CAR = "CAR"
 
 
@@ -17,9 +16,10 @@ class Coordinate(BaseModel):
 
 
 class SpontaneousDestinationRequest(BaseModel):
-    currentLocation: Coordinate
+    startLocation: Coordinate
     startAt: datetime
     returnBy: datetime
+    transportMode: TransportMode
     desiredThemes: list[str] = Field(default_factory=list)
 
 
@@ -39,9 +39,7 @@ class DestinationRecommendation(BaseModel):
     themeScore: float
     distanceMeters: int
     score: float
-    bestTravelMinutes: int | None = None
-    bestStayMinutes: int | None = None
-    transportOptions: list[TransportOption] = Field(default_factory=list)
+    transport: TransportOption
 
 
 class SpontaneousDestinationResponse(BaseModel):
@@ -84,7 +82,7 @@ class SpontaneousCourseResponse(BaseModel):
 
 class SpontaneousCourseRequest(BaseModel):
     destinationId: str
-    currentLocation: Coordinate
+    startLocation: Coordinate
     startAt: datetime
     returnBy: datetime
     desiredThemes: list[str] = Field(default_factory=list)

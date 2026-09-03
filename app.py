@@ -60,15 +60,16 @@ from spontaneous.destinations import (
 )
 
 from spontaneous.service import (
+    MAX_DESTINATION_RECOMMENDATIONS,
     calculate_destination_score,
     calculate_final_destination_score,
+    calculate_zone_theme_score,
+    has_coarse_course_viability,
 )
 
 from spontaneous.routing import (
     RoutingApiError,
-    get_transport_options,
-    get_best_travel_minutes,
-    get_best_stay_minutes,
+    get_transport_option,
 )
 
 from spontaneous.places import (
@@ -91,6 +92,7 @@ from spontaneous.course import (
     has_required_course_roles,
     has_required_theme_coverage,
     normalize_course_orders,
+    remove_last_optional_stop,
     public_course_stop,
 )
 # -------
@@ -587,14 +589,59 @@ def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> Sc
 def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
 ) -> SpontaneousDestinationResponse:
+    if request.returnBy <= request.startAt:
+        raise HTTPException(
+            status_code=422,
+            detail="COURSE_NOT_FEASIBLE",
+        )
+
     candidates = []
     routing_cache = {}
+    places_cache = {}
+    unavailable_reasons = []
 
     for zone in DESTINATION_ZONES:
+        try:
+            places = search_places_by_zone(
+                zone,
+                places_cache=places_cache,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="TOUR_API_ERROR",
+            ) from exc
+
+        places = filter_course_candidates(
+            places
+        )
+
+        if not places:
+            continue
+
+        theme_score = calculate_zone_theme_score(
+            places,
+            request.desiredThemes,
+        )
+
+        if request.desiredThemes and theme_score == 0:
+            continue
+
+        if not has_coarse_course_viability(
+            places,
+            request.desiredThemes,
+        ):
+            continue
+
         final_score, theme_score, distance = calculate_destination_score(
             zone,
-            request.currentLocation,
-            request.desiredThemes,
+            request.startLocation,
+            theme_score,
         )
 
         candidates.append(
@@ -607,43 +654,44 @@ def recommend_spontaneous_destinations(
         )
 
     candidates.sort(
-        key=lambda item: item["score"],
-        reverse=True,
+        key=lambda item: (
+            -item["score"],
+            -item["themeScore"],
+            item["distanceMeters"],
+            item["zone"].destination_id,
+        ),
     )
 
     results = []
     for candidate in candidates:
+        if len(results) >= MAX_DESTINATION_RECOMMENDATIONS:
+            break
+
         zone = candidate["zone"]
         destination = Coordinate(
             latitude=zone.center_latitude,
             longitude=zone.center_longitude,
         )
-        transport_options = get_transport_options(
-            request.currentLocation,
+        transport = get_transport_option(
+            request.startLocation,
             destination,
+            request.transportMode,
             request.startAt,
             request.returnBy,
             cache=routing_cache,
         )
 
-        has_available_transport = any(
-            option.available
-            for option in transport_options
-        )
-        if not has_available_transport:
+        if not transport.available:
+            if transport.unavailableReason:
+                unavailable_reasons.append(
+                    transport.unavailableReason
+                )
             continue
-
-        best_travel_minutes = get_best_travel_minutes(
-            transport_options
-        )
-        best_stay_minutes = get_best_stay_minutes(
-            transport_options
-        )
 
         final_score = calculate_final_destination_score(
             candidate["themeScore"],
-            best_travel_minutes,
-            best_stay_minutes,
+            transport.outboundMinutes,
+            transport.availableStayMinutes,
         )
 
         results.append(
@@ -653,23 +701,43 @@ def recommend_spontaneous_destinations(
                 "themeScore": candidate["themeScore"],
                 "distanceMeters": candidate["distanceMeters"],
                 "score": round(final_score, 4),
-                "bestTravelMinutes": best_travel_minutes,
-                "bestStayMinutes": best_stay_minutes,
-                "transportOptions": [
-                    option.model_dump(mode="json")
-                    for option in transport_options
-                ],
+                "transport": transport.model_dump(mode="json"),
             }
         )
 
     results.sort(
-        key=lambda item: item["score"],
-        reverse=True,
+        key=lambda item: (
+            -item["score"],
+            -item["themeScore"],
+            item["transport"]["outboundMinutes"],
+            item["distanceMeters"],
+            item["destinationId"],
+        ),
     )
     if not results:
+        if "ODSAY_QUOTA_EXCEEDED" in unavailable_reasons:
+            raise HTTPException(
+                status_code=429,
+                detail="ODSAY_QUOTA_EXCEEDED",
+            )
+
+        if "ODSAY_AUTH_FAILED" in unavailable_reasons:
+            raise HTTPException(
+                status_code=401,
+                detail="ODSAY_AUTH_FAILED",
+            )
+
+        if "EXTERNAL_ROUTING_API_ERROR" in unavailable_reasons:
+            raise HTTPException(
+                status_code=502,
+                detail="EXTERNAL_ROUTING_API_ERROR",
+            )
+
         raise HTTPException(status_code=404, detail="DESTINATIONS_NOT_FOUND")
 
-    return SpontaneousDestinationResponse(destinations=results[:5])
+    return SpontaneousDestinationResponse(
+        destinations=results[:MAX_DESTINATION_RECOMMENDATIONS]
+    )
 
 
 @app.post("/api/v1/spontaneous-trips/course", response_model=SpontaneousCourseResponse)
@@ -682,12 +750,6 @@ def create_spontaneous_course(
         raise HTTPException(
             status_code=422,
             detail="COURSE_NOT_FEASIBLE",
-        )
-
-    if request.transportMode == TransportMode.BICYCLE:
-        raise HTTPException(
-            status_code=422,
-            detail="UNSUPPORTED_TRANSPORT_MODE",
         )
 
     zone = find_destination_zone(
@@ -776,7 +838,7 @@ def create_spontaneous_course(
     course = generate_course(
         grouped_places,
         desired_themes,
-        request.currentLocation,
+        request.startLocation,
         role_plan=role_plan,
         required_themes_by_role=required_themes_by_role,
     )
@@ -815,7 +877,7 @@ def create_spontaneous_course(
         try:
             course = calculate_course_travel_minutes(
                 course,
-                request.currentLocation,
+                request.startLocation,
                 request.transportMode,
                 cache=routing_cache,
             )
@@ -866,6 +928,15 @@ def create_spontaneous_course(
                 break
 
         if invalid_stop_index is not None:
+            if course[invalid_stop_index].get(
+                "_required",
+                False,
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="COURSE_NOT_FEASIBLE",
+                )
+
             course = normalize_course_orders(
                 course[:invalid_stop_index]
                 + course[invalid_stop_index + 1:]
@@ -909,9 +980,17 @@ def create_spontaneous_course(
                 },
             }
 
-        course = normalize_course_orders(
-            course[:-1]
+        trimmed_course = remove_last_optional_stop(
+            course
         )
+
+        if trimmed_course is None:
+            raise HTTPException(
+                status_code=422,
+                detail="COURSE_NOT_FEASIBLE",
+            )
+
+        course = trimmed_course
 
     raise HTTPException(
         status_code=422,

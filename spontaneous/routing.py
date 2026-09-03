@@ -485,7 +485,6 @@ def search_travel_minutes(
             destination,
         )
     else:
-        # BICYCLE은 아직 미구현
         minutes = None
 
     if cache is not None:
@@ -493,216 +492,70 @@ def search_travel_minutes(
 
     return minutes
 
-
-
-
-def get_transport_options(
+def get_transport_option(
     origin: Coordinate,
     destination: Coordinate,
+    mode: TransportMode,
     start_at: datetime,
     return_by: datetime,
     cache: TravelMinutesCache | None = None,
-) -> list[TransportOption]:
-
-    options: list[TransportOption] = []
-
-   
+) -> TransportOption:
     total_available_minutes = int(
         (return_by - start_at).total_seconds() // 60
     )
 
-
-    public_transit_error = None
-
     try:
-        public_transit_minutes = search_travel_minutes(
-            TransportMode.PUBLIC_TRANSIT,
+        outbound_minutes = search_travel_minutes(
+            mode,
             origin,
             destination,
             cache=cache,
         )
 
-        public_transit_return_minutes = search_travel_minutes(
-            TransportMode.PUBLIC_TRANSIT,
+        return_minutes = search_travel_minutes(
+            mode,
             destination,
             origin,
             cache=cache,
         )
     except RoutingApiError as exc:
-        public_transit_minutes = None
-        public_transit_return_minutes = None
-        public_transit_error = exc.detail
-
-    if (
-        public_transit_minutes is not None
-        and public_transit_return_minutes is not None
-    ):
-        available_stay_minutes = (
-            total_available_minutes
-            - public_transit_minutes
-            - public_transit_return_minutes
-        )
-
-       
-        if available_stay_minutes < MIN_STAY_MINUTES:
-            options.append(
-                TransportOption(
-                    mode=TransportMode.PUBLIC_TRANSIT,
-                    available=False,
-                    outboundMinutes=public_transit_minutes,
-                    returnMinutes=public_transit_return_minutes,
-                    availableStayMinutes=available_stay_minutes,
-                    unavailableReason="INSUFFICIENT_STAY_TIME",
-                )
-            )
-        else:
-            options.append(
-                TransportOption(
-                    mode=TransportMode.PUBLIC_TRANSIT,
-                    available=True,
-                    outboundMinutes=public_transit_minutes,
-                    returnMinutes=public_transit_return_minutes,
-                    availableStayMinutes=available_stay_minutes,
-                    unavailableReason=None,
-                )
-            )
-
-    else:
-        options.append(
-            TransportOption(
-                mode=TransportMode.PUBLIC_TRANSIT,
-                available=False,
-                unavailableReason=public_transit_error or "NO_ROUTE",
-            )
-        )
-
-   
-
-    walking_minutes = search_travel_minutes(
-        TransportMode.WALK,
-        origin,
-        destination,
-        cache=cache,
-    )
-
-    walking_return_minutes = search_travel_minutes(
-        TransportMode.WALK,
-        destination,
-        origin,
-        cache=cache,
-    )
-
-    if (
-        walking_minutes is not None
-        and walking_return_minutes is not None
-    ):
-        available_stay_minutes = (
-            total_available_minutes
-            - walking_minutes
-            - walking_return_minutes
-        )
-
-        if available_stay_minutes < MIN_STAY_MINUTES:
-            options.append(
-                TransportOption(
-                    mode=TransportMode.WALK,
-                    available=False,
-                    outboundMinutes=walking_minutes,
-                    returnMinutes=walking_return_minutes,
-                    availableStayMinutes=available_stay_minutes,
-                    unavailableReason="INSUFFICIENT_STAY_TIME",
-                )
-            )
-        else:
-            options.append(
-                TransportOption(
-                    mode=TransportMode.WALK,
-                    available=True,
-                    outboundMinutes=walking_minutes,
-                    returnMinutes=walking_return_minutes,
-                    availableStayMinutes=available_stay_minutes,
-                    unavailableReason=None,
-                )
-            )
-
-    else:
-        options.append(
-            TransportOption(
-                mode=TransportMode.WALK,
-                available=False,
-                unavailableReason="NO_ROUTE",
-            )
-        )
-
-   
-
-    options.append(
-        TransportOption(
-            mode=TransportMode.BICYCLE,
+        return TransportOption(
+            mode=mode,
             available=False,
-            unavailableReason="NOT_IMPLEMENTED",
-        )
-    )
-
-   
-
-    car_minutes = search_travel_minutes(
-        TransportMode.CAR,
-        origin,
-        destination,
-        cache=cache,
-    )
-
-    car_return_minutes = search_travel_minutes(
-        TransportMode.CAR,
-        destination,
-        origin,
-        cache=cache,
-    )
-
-    if (
-        car_minutes is not None
-        and car_return_minutes is not None
-    ):
-        available_stay_minutes = (
-            total_available_minutes
-            - car_minutes
-            - car_return_minutes
+            unavailableReason=exc.detail,
         )
 
-        if available_stay_minutes < MIN_STAY_MINUTES:
-            options.append(
-                TransportOption(
-                    mode=TransportMode.CAR,
-                    available=False,
-                    outboundMinutes=car_minutes,
-                    returnMinutes=car_return_minutes,
-                    availableStayMinutes=available_stay_minutes,
-                    unavailableReason="INSUFFICIENT_STAY_TIME",
-                )
-            )
-        else:
-            options.append(
-                TransportOption(
-                    mode=TransportMode.CAR,
-                    available=True,
-                    outboundMinutes=car_minutes,
-                    returnMinutes=car_return_minutes,
-                    availableStayMinutes=available_stay_minutes,
-                    unavailableReason=None,
-                )
-            )
-
-    else:
-        options.append(
-            TransportOption(
-                mode=TransportMode.CAR,
-                available=False,
-                unavailableReason="NO_ROUTE",
-            )
+    if outbound_minutes is None or return_minutes is None:
+        return TransportOption(
+            mode=mode,
+            available=False,
+            unavailableReason="NO_ROUTE",
         )
 
-    return options
+    available_stay_minutes = (
+        total_available_minutes
+        - outbound_minutes
+        - return_minutes
+    )
+
+    if available_stay_minutes < MIN_STAY_MINUTES:
+        return TransportOption(
+            mode=mode,
+            available=False,
+            outboundMinutes=outbound_minutes,
+            returnMinutes=return_minutes,
+            availableStayMinutes=available_stay_minutes,
+            unavailableReason="INSUFFICIENT_STAY_TIME",
+        )
+
+    return TransportOption(
+        mode=mode,
+        available=True,
+        outboundMinutes=outbound_minutes,
+        returnMinutes=return_minutes,
+        availableStayMinutes=available_stay_minutes,
+        unavailableReason=None,
+    )
 
 
 def get_travel_minutes_for_mode(
@@ -717,38 +570,3 @@ def get_travel_minutes_for_mode(
         destination,
         cache=cache,
     )
-
-
-def get_best_travel_minutes(
-    options: list[TransportOption],
-) -> int | None:
-    available_minutes = [
-        option.outboundMinutes
-        for option in options
-        if (
-            option.available
-            and option.outboundMinutes is not None
-        )
-    ]
-
-    if not available_minutes:
-        return None
-
-    return min(available_minutes)
-
-def get_best_stay_minutes(
-    options: list[TransportOption],
-) -> int | None:
-    available_stay_minutes = [
-        option.availableStayMinutes
-        for option in options
-        if (
-            option.available
-            and option.availableStayMinutes is not None
-        )
-    ]
-
-    if not available_stay_minutes:
-        return None
-
-    return max(available_stay_minutes)

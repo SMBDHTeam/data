@@ -8,6 +8,7 @@ from spontaneous.destinations import DestinationZone
 from datetime import datetime, time
 
 TOUR_API_BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
+TourApiPlacesCache = dict[str, list[dict]]
 TourApiDetailCache = dict[tuple[str, str], dict]
 SEAFOOD_MENU_KEYWORDS = [
     "회",
@@ -96,7 +97,14 @@ def detail_cache_key(
 
 def search_places_by_zone(
     zone: DestinationZone,
+    places_cache: TourApiPlacesCache | None = None,
 ) -> list[dict]:
+    if (
+        places_cache is not None
+        and zone.destination_id in places_cache
+    ):
+        return places_cache[zone.destination_id]
+
     service_key = os.getenv("TOUR_API_KEY")
 
     if not service_key:
@@ -130,9 +138,21 @@ def search_places_by_zone(
     items = body.get("items")
 
     if not items:
-        return []
+        places: list[dict] = []
+    else:
+        item = items.get("item", [])
 
-    return items.get("item", [])
+        if isinstance(item, list):
+            places = item
+        elif isinstance(item, dict):
+            places = [item]
+        else:
+            places = []
+
+    if places_cache is not None:
+        places_cache[zone.destination_id] = places
+
+    return places
 
 
 def infer_place_themes(

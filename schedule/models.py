@@ -184,7 +184,7 @@ class ScheduleTransit(BaseModel):
     wait_minutes: int = Field(default=0, alias="waitMinutes")
     transfer_count: int = Field(default=0, alias="transferCount")
     fare_amount: int | None = Field(default=None, alias="fareAmount")
-    provider: str = "FASTAPI_MIGRATION"
+    provider: str | None = None
     realtime_status: str = Field(default="UNAVAILABLE", alias="realtimeStatus")
     fallback_used: bool = Field(default=True, alias="fallbackUsed")
     segments: list[ScheduleSegment] = Field(default_factory=list)

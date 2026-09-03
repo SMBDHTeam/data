@@ -299,7 +299,7 @@ def walk_fallback_transit(
         waitMinutes=0,
         transferCount=0,
         fareAmount=None,
-        provider="INTERNAL_WALK",
+        provider=None,
         realtimeStatus="UNAVAILABLE",
         fallbackUsed=False,
         segments=[
@@ -342,7 +342,7 @@ def tmap_walk_transit(
         waitMinutes=0,
         transferCount=0,
         fareAmount=None,
-        provider="TMAP",
+        provider=None,
         realtimeStatus="UNAVAILABLE",
         fallbackUsed=False,
         segments=[
@@ -401,7 +401,7 @@ def tmap_route_lines(
             routeOrder=transit.route_order,
             lineOrder=1,
             mode="WALK",
-            lineName="TMAP 보행 경로",
+            lineName="도보 이동",
             startName=origin.name,
             endName=destination.name,
             durationMinutes=transit.total_minutes,

@@ -77,7 +77,6 @@ jobs:
           SPRING_DATASOURCE_URL: ${{ secrets.SPRING_DATASOURCE_URL }}
           SPRING_DATASOURCE_USERNAME: ${{ secrets.SPRING_DATASOURCE_USERNAME }}
           SPRING_DATASOURCE_PASSWORD: ${{ secrets.SPRING_DATASOURCE_PASSWORD }}
-          ODSAY_API_KEY: ${{ secrets.ODSAY_API_KEY }}
           SKT_API_KEY: ${{ secrets.SKT_API_KEY }}
           TOUR_API_KEY: ${{ secrets.TOUR_API_KEY }}
 
@@ -98,7 +97,8 @@ jobs:
             SPRING_DATASOURCE_URL
             SPRING_DATASOURCE_USERNAME
             SPRING_DATASOURCE_PASSWORD
-            ODSAY_API_KEY
+            SKT_API_KEY
+            TOUR_API_KEY
           )
 
           for variable_name in "${required_variables[@]}"; do
@@ -130,15 +130,12 @@ jobs:
             printf 'SPRING_DATASOURCE_URL=%s\n' "$SPRING_DATASOURCE_URL"
             printf 'SPRING_DATASOURCE_USERNAME=%s\n' "$SPRING_DATASOURCE_USERNAME"
             printf 'SPRING_DATASOURCE_PASSWORD=%s\n' "$SPRING_DATASOURCE_PASSWORD"
-            printf 'ODSAY_ENABLED=true\n'
-            printf 'ODSAY_API_KEY=%s\n' "$ODSAY_API_KEY"
-            if [ -n "${TOUR_API_KEY:-}" ]; then
             printf 'TOUR_API_KEY=%s\n' "$TOUR_API_KEY"
-            fi
-            if [ -n "${SKT_API_KEY:-}" ]; then
-              printf 'TMAP_WALKING_ENABLED=true\n'
-              printf 'SKT_API_KEY=%s\n' "$SKT_API_KEY"
-            fi
+            printf 'TMAP_WALKING_ENABLED=true\n'
+            printf 'TMAP_BASE_URL=https://apis.openapi.sk.com\n'
+            printf 'TMAP_TRANSIT_BASE_URL=https://apis.openapi.sk.com\n'
+            printf 'SKT_API_KEY=%s\n' "$SKT_API_KEY"
+            printf 'ODSAY_ENABLED=false\n'
           } > .env.dev
 
           chmod 600 .env.dev

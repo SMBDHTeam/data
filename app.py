@@ -86,9 +86,7 @@ from spontaneous.course import (
     get_required_roles,
     get_required_themes_by_role,
     generate_course,
-    calculate_course_travel_minutes,
-    apply_course_timeline,
-    has_complete_travel_minutes,
+    calculate_sequential_course_timeline,
     has_required_course_roles,
     has_required_theme_coverage,
     normalize_course_orders,
@@ -880,10 +878,11 @@ def create_spontaneous_course(
             )
 
         try:
-            course = calculate_course_travel_minutes(
+            timeline = calculate_sequential_course_timeline(
                 course,
                 request.startLocation,
                 request.transportMode,
+                request.startAt,
                 cache=routing_cache,
             )
         except RoutingApiError as exc:
@@ -891,20 +890,6 @@ def create_spontaneous_course(
                 status_code=exc.status_code,
                 detail=exc.detail,
             ) from exc
-
-        if not has_complete_travel_minutes(
-            course
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="NO_ROUTE",
-            )
-
-        try:
-            timeline = apply_course_timeline(
-                course,
-                request.startAt,
-            )
         except ValueError as exc:
             raise HTTPException(
                 status_code=422,

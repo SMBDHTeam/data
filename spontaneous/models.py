@@ -10,6 +10,27 @@ class TransportMode(str, Enum):
     CAR = "CAR"
 
 
+class TravelTheme(str, Enum):
+    SEA = "SEA"
+    SEAFOOD = "SEAFOOD"
+    FOOD = "FOOD"
+    CAFE = "CAFE"
+    WALK = "WALK"
+    NIGHT_VIEW = "NIGHT_VIEW"
+    CULTURE = "CULTURE"
+    SHOPPING = "SHOPPING"
+    HEALING = "HEALING"
+    NATURE = "NATURE"
+    ACTIVITY = "ACTIVITY"
+
+
+class CourseRole(str, Enum):
+    ACTIVITY = "ACTIVITY"
+    MEAL = "MEAL"
+    CAFE = "CAFE"
+    NIGHT_VIEW = "NIGHT_VIEW"
+
+
 class Coordinate(BaseModel):
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
@@ -20,7 +41,7 @@ class SpontaneousDestinationRequest(BaseModel):
     startAt: datetime
     returnBy: datetime
     transportMode: TransportMode
-    desiredThemes: list[str] = Field(default_factory=list)
+    desiredThemes: list[TravelTheme] = Field(default_factory=list)
 
 
 class TransportOption(BaseModel):
@@ -33,13 +54,19 @@ class TransportOption(BaseModel):
     unavailableReason: str | None = None
 
 
+class TransportSummary(BaseModel):
+    mode: TransportMode
+    outboundMinutes: int
+    returnMinutes: int
+    availableStayMinutes: int
+
+
 class DestinationRecommendation(BaseModel):
     destinationId: str
     name: str
     themeScore: float
     distanceMeters: int
-    score: float
-    transport: TransportOption
+    transport: TransportSummary
 
 
 class SpontaneousDestinationResponse(BaseModel):
@@ -48,7 +75,7 @@ class SpontaneousDestinationResponse(BaseModel):
 
 class SpontaneousCourseStop(BaseModel):
     order: int
-    role: str
+    role: CourseRole
     name: str
     contentId: str | None = None
     contentTypeId: str | None = None
@@ -57,26 +84,17 @@ class SpontaneousCourseStop(BaseModel):
     travelMinutesFromPrevious: int | None = None
     arrivalAt: datetime | None = None
     departureAt: datetime | None = None
-    returnTravelMinutes: int | None = None
-    inboundMinutes: int | None = None
-    arriveAt: datetime | None = None
-    departAt: datetime | None = None
     stayMinutes: int
-    themes: list[str] = Field(default_factory=list)
-    score: float
+    themes: list[TravelTheme] = Field(default_factory=list)
 
 
 class SpontaneousCourseResponse(BaseModel):
     destinationId: str
     name: str
     transportMode: TransportMode
-    transport: TransportOption | None = None
     returnTravelMinutes: int | None = None
-    finalReturnMinutes: int | None = None
     estimatedReturnAt: datetime | None = None
-    expectedReturnAt: datetime | None = None
     returnBy: datetime | None = None
-    candidateCounts: dict[str, int] = Field(default_factory=dict)
     course: list[SpontaneousCourseStop] = Field(default_factory=list)
 
 
@@ -85,5 +103,5 @@ class SpontaneousCourseRequest(BaseModel):
     startLocation: Coordinate
     startAt: datetime
     returnBy: datetime
-    desiredThemes: list[str] = Field(default_factory=list)
+    desiredThemes: list[TravelTheme] = Field(default_factory=list)
     transportMode: TransportMode

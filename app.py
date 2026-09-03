@@ -592,7 +592,7 @@ def recommend_spontaneous_destinations(
     if request.returnBy <= request.startAt:
         raise HTTPException(
             status_code=422,
-            detail="COURSE_NOT_FEASIBLE",
+            detail="INVALID_TIME_RANGE",
         )
 
     candidates = []
@@ -609,7 +609,7 @@ def recommend_spontaneous_destinations(
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=503,
-                detail=str(exc),
+                detail="TOUR_API_NOT_CONFIGURED",
             ) from exc
         except Exception as exc:
             raise HTTPException(
@@ -701,7 +701,12 @@ def recommend_spontaneous_destinations(
                 "themeScore": candidate["themeScore"],
                 "distanceMeters": candidate["distanceMeters"],
                 "score": round(final_score, 4),
-                "transport": transport.model_dump(mode="json"),
+                "transport": {
+                    "mode": transport.mode.value,
+                    "outboundMinutes": transport.outboundMinutes,
+                    "returnMinutes": transport.returnMinutes,
+                    "availableStayMinutes": transport.availableStayMinutes,
+                },
             }
         )
 
@@ -717,13 +722,13 @@ def recommend_spontaneous_destinations(
     if not results:
         if "ODSAY_QUOTA_EXCEEDED" in unavailable_reasons:
             raise HTTPException(
-                status_code=429,
+                status_code=503,
                 detail="ODSAY_QUOTA_EXCEEDED",
             )
 
         if "ODSAY_AUTH_FAILED" in unavailable_reasons:
             raise HTTPException(
-                status_code=401,
+                status_code=503,
                 detail="ODSAY_AUTH_FAILED",
             )
 
@@ -749,7 +754,7 @@ def create_spontaneous_course(
     if request.returnBy <= request.startAt:
         raise HTTPException(
             status_code=422,
-            detail="COURSE_NOT_FEASIBLE",
+            detail="INVALID_TIME_RANGE",
         )
 
     zone = find_destination_zone(
@@ -770,7 +775,7 @@ def create_spontaneous_course(
     except RuntimeError as exc:
         raise HTTPException(
             status_code=503,
-            detail=str(exc),
+            detail="TOUR_API_NOT_CONFIGURED",
         ) from exc
     except Exception as exc:
         raise HTTPException(
@@ -961,23 +966,15 @@ def create_spontaneous_course(
                 "destinationId": zone.destination_id,
                 "name": zone.name,
                 "transportMode": request.transportMode.value,
+                "returnTravelMinutes": timeline[
+                    "returnTravelMinutes"
+                ],
+                "estimatedReturnAt": estimated_return_at.isoformat(),
+                "returnBy": request.returnBy.isoformat(),
                 "course": [
                     public_course_stop(stop)
                     for stop in timeline["course"]
                 ],
-                "returnTravelMinutes": timeline[
-                    "returnTravelMinutes"
-                ],
-                "finalReturnMinutes": timeline[
-                    "returnTravelMinutes"
-                ],
-                "estimatedReturnAt": estimated_return_at.isoformat(),
-                "expectedReturnAt": estimated_return_at.isoformat(),
-                "returnBy": request.returnBy.isoformat(),
-                "candidateCounts": {
-                    "searched": before_count,
-                    "open": after_count,
-                },
             }
 
         trimmed_course = remove_last_optional_stop(

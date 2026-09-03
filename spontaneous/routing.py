@@ -78,14 +78,14 @@ def parse_odsay_error(payload: dict) -> tuple[str, int] | None:
     message_lower = message.lower()
 
     if code == "429" or "quota" in message_lower:
-        return ("ODSAY_QUOTA_EXCEEDED", 429)
+        return ("ODSAY_QUOTA_EXCEEDED", 503)
 
     if (
         "auth" in message_lower
         or "authentication" in message_lower
         or "apikey" in message_lower
     ):
-        return ("ODSAY_AUTH_FAILED", 401)
+        return ("ODSAY_AUTH_FAILED", 503)
 
     return ("EXTERNAL_ROUTING_API_ERROR", 502)
 
@@ -121,7 +121,7 @@ def search_public_transit_minutes(
     if not api_key:
         raise_odsay_error(
             "ODSAY_AUTH_FAILED",
-            401,
+            503,
         )
 
     base_url = os.getenv(
@@ -168,7 +168,7 @@ def search_public_transit_minutes(
 
         if exc.code == 429:
             detail = "ODSAY_QUOTA_EXCEEDED"
-            status_code = 429
+            status_code = 503
 
         raise_odsay_error(
             detail,

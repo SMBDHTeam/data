@@ -4,8 +4,6 @@ from math import asin, cos, radians, sin, sqrt
 
 from spontaneous.destinations import DESTINATION_ZONES, DestinationZone
 from spontaneous.models import Coordinate
-from spontaneous.models import TransportOption, TransportMode
-from decimal import Decimal
 
 EARTH_RADIUS_METERS = 6_371_000
 
@@ -120,15 +118,15 @@ def calculate_stay_time_score(minutes: int) -> float:
 
 def calculate_final_destination_score(
     theme_score: float,
-    best_travel_minutes: int,
-    best_stay_minutes: int,
+    travel_minutes: int,
+    stay_minutes: int,
 ) -> float:
     travel_score = calculate_travel_time_score(
-        best_travel_minutes
+        travel_minutes
     )
 
     stay_score = calculate_stay_time_score(
-        best_stay_minutes
+        stay_minutes
     )
 
     final_score = (

@@ -66,9 +66,7 @@ from spontaneous.service import (
 
 from spontaneous.routing import (
     RoutingApiError,
-    get_transport_options,
-    get_best_travel_minutes,
-    get_best_stay_minutes,
+    get_transport_option,
 )
 
 from spontaneous.places import (
@@ -587,13 +585,20 @@ def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> Sc
 def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
 ) -> SpontaneousDestinationResponse:
+    if request.returnBy <= request.startAt:
+        raise HTTPException(
+            status_code=422,
+            detail="COURSE_NOT_FEASIBLE",
+        )
+
     candidates = []
     routing_cache = {}
+    unavailable_reasons = []
 
     for zone in DESTINATION_ZONES:
         final_score, theme_score, distance = calculate_destination_score(
             zone,
-            request.currentLocation,
+            request.startLocation,
             request.desiredThemes,
         )
 
@@ -618,32 +623,26 @@ def recommend_spontaneous_destinations(
             latitude=zone.center_latitude,
             longitude=zone.center_longitude,
         )
-        transport_options = get_transport_options(
-            request.currentLocation,
+        transport = get_transport_option(
+            request.startLocation,
             destination,
+            request.transportMode,
             request.startAt,
             request.returnBy,
             cache=routing_cache,
         )
 
-        has_available_transport = any(
-            option.available
-            for option in transport_options
-        )
-        if not has_available_transport:
+        if not transport.available:
+            if transport.unavailableReason:
+                unavailable_reasons.append(
+                    transport.unavailableReason
+                )
             continue
-
-        best_travel_minutes = get_best_travel_minutes(
-            transport_options
-        )
-        best_stay_minutes = get_best_stay_minutes(
-            transport_options
-        )
 
         final_score = calculate_final_destination_score(
             candidate["themeScore"],
-            best_travel_minutes,
-            best_stay_minutes,
+            transport.outboundMinutes,
+            transport.availableStayMinutes,
         )
 
         results.append(
@@ -653,12 +652,7 @@ def recommend_spontaneous_destinations(
                 "themeScore": candidate["themeScore"],
                 "distanceMeters": candidate["distanceMeters"],
                 "score": round(final_score, 4),
-                "bestTravelMinutes": best_travel_minutes,
-                "bestStayMinutes": best_stay_minutes,
-                "transportOptions": [
-                    option.model_dump(mode="json")
-                    for option in transport_options
-                ],
+                "transport": transport.model_dump(mode="json"),
             }
         )
 
@@ -667,6 +661,24 @@ def recommend_spontaneous_destinations(
         reverse=True,
     )
     if not results:
+        if "ODSAY_QUOTA_EXCEEDED" in unavailable_reasons:
+            raise HTTPException(
+                status_code=429,
+                detail="ODSAY_QUOTA_EXCEEDED",
+            )
+
+        if "ODSAY_AUTH_FAILED" in unavailable_reasons:
+            raise HTTPException(
+                status_code=401,
+                detail="ODSAY_AUTH_FAILED",
+            )
+
+        if "EXTERNAL_ROUTING_API_ERROR" in unavailable_reasons:
+            raise HTTPException(
+                status_code=502,
+                detail="EXTERNAL_ROUTING_API_ERROR",
+            )
+
         raise HTTPException(status_code=404, detail="DESTINATIONS_NOT_FOUND")
 
     return SpontaneousDestinationResponse(destinations=results[:5])
@@ -682,12 +694,6 @@ def create_spontaneous_course(
         raise HTTPException(
             status_code=422,
             detail="COURSE_NOT_FEASIBLE",
-        )
-
-    if request.transportMode == TransportMode.BICYCLE:
-        raise HTTPException(
-            status_code=422,
-            detail="UNSUPPORTED_TRANSPORT_MODE",
         )
 
     zone = find_destination_zone(
@@ -776,7 +782,7 @@ def create_spontaneous_course(
     course = generate_course(
         grouped_places,
         desired_themes,
-        request.currentLocation,
+        request.startLocation,
         role_plan=role_plan,
         required_themes_by_role=required_themes_by_role,
     )
@@ -815,7 +821,7 @@ def create_spontaneous_course(
         try:
             course = calculate_course_travel_minutes(
                 course,
-                request.currentLocation,
+                request.startLocation,
                 request.transportMode,
                 cache=routing_cache,
             )

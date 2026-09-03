@@ -1223,8 +1223,17 @@ def normalize_course_orders(
 def public_course_stop(
     stop: dict,
 ) -> dict:
+    private_fields = {
+        "raw",
+        "score",
+        "returnTravelMinutes",
+        "inboundMinutes",
+        "arriveAt",
+        "departAt",
+    }
+
     return {
         key: value
         for key, value in stop.items()
-        if key != "raw" and not key.startswith("_")
+        if key not in private_fields and not key.startswith("_")
     }

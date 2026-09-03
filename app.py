@@ -60,8 +60,11 @@ from spontaneous.destinations import (
 )
 
 from spontaneous.service import (
+    MAX_DESTINATION_RECOMMENDATIONS,
     calculate_destination_score,
     calculate_final_destination_score,
+    calculate_zone_theme_score,
+    has_coarse_course_viability,
 )
 
 from spontaneous.routing import (
@@ -89,6 +92,7 @@ from spontaneous.course import (
     has_required_course_roles,
     has_required_theme_coverage,
     normalize_course_orders,
+    remove_last_optional_stop,
     public_course_stop,
 )
 # -------
@@ -593,13 +597,51 @@ def recommend_spontaneous_destinations(
 
     candidates = []
     routing_cache = {}
+    places_cache = {}
     unavailable_reasons = []
 
     for zone in DESTINATION_ZONES:
+        try:
+            places = search_places_by_zone(
+                zone,
+                places_cache=places_cache,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="TOUR_API_ERROR",
+            ) from exc
+
+        places = filter_course_candidates(
+            places
+        )
+
+        if not places:
+            continue
+
+        theme_score = calculate_zone_theme_score(
+            places,
+            request.desiredThemes,
+        )
+
+        if request.desiredThemes and theme_score == 0:
+            continue
+
+        if not has_coarse_course_viability(
+            places,
+            request.desiredThemes,
+        ):
+            continue
+
         final_score, theme_score, distance = calculate_destination_score(
             zone,
             request.startLocation,
-            request.desiredThemes,
+            theme_score,
         )
 
         candidates.append(
@@ -612,12 +654,19 @@ def recommend_spontaneous_destinations(
         )
 
     candidates.sort(
-        key=lambda item: item["score"],
-        reverse=True,
+        key=lambda item: (
+            -item["score"],
+            -item["themeScore"],
+            item["distanceMeters"],
+            item["zone"].destination_id,
+        ),
     )
 
     results = []
     for candidate in candidates:
+        if len(results) >= MAX_DESTINATION_RECOMMENDATIONS:
+            break
+
         zone = candidate["zone"]
         destination = Coordinate(
             latitude=zone.center_latitude,
@@ -657,8 +706,13 @@ def recommend_spontaneous_destinations(
         )
 
     results.sort(
-        key=lambda item: item["score"],
-        reverse=True,
+        key=lambda item: (
+            -item["score"],
+            -item["themeScore"],
+            item["transport"]["outboundMinutes"],
+            item["distanceMeters"],
+            item["destinationId"],
+        ),
     )
     if not results:
         if "ODSAY_QUOTA_EXCEEDED" in unavailable_reasons:
@@ -681,7 +735,9 @@ def recommend_spontaneous_destinations(
 
         raise HTTPException(status_code=404, detail="DESTINATIONS_NOT_FOUND")
 
-    return SpontaneousDestinationResponse(destinations=results[:5])
+    return SpontaneousDestinationResponse(
+        destinations=results[:MAX_DESTINATION_RECOMMENDATIONS]
+    )
 
 
 @app.post("/api/v1/spontaneous-trips/course", response_model=SpontaneousCourseResponse)
@@ -872,6 +928,15 @@ def create_spontaneous_course(
                 break
 
         if invalid_stop_index is not None:
+            if course[invalid_stop_index].get(
+                "_required",
+                False,
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="COURSE_NOT_FEASIBLE",
+                )
+
             course = normalize_course_orders(
                 course[:invalid_stop_index]
                 + course[invalid_stop_index + 1:]
@@ -915,9 +980,17 @@ def create_spontaneous_course(
                 },
             }
 
-        course = normalize_course_orders(
-            course[:-1]
+        trimmed_course = remove_last_optional_stop(
+            course
         )
+
+        if trimmed_course is None:
+            raise HTTPException(
+                status_code=422,
+                detail="COURSE_NOT_FEASIBLE",
+            )
+
+        course = trimmed_course
 
     raise HTTPException(
         status_code=422,

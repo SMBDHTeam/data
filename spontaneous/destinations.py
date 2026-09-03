@@ -1,7 +1,7 @@
 # 부산 권역 목록
 
 from dataclasses import dataclass
-from typing import FrozenSet, List
+from typing import List
 
 
 @dataclass(frozen=True)
@@ -11,7 +11,6 @@ class DestinationZone:
     center_latitude: float
     center_longitude: float
     radius_meters: int
-    themes: FrozenSet[str]
 
 
 DESTINATION_ZONES: List[DestinationZone] = [
@@ -21,14 +20,6 @@ DESTINATION_ZONES: List[DestinationZone] = [
         center_latitude=35.1532,
         center_longitude=129.1187,
         radius_meters=3000,
-        themes=frozenset({
-            "SEA",
-            "SEAFOOD",
-            "FOOD",
-            "CAFE",
-            "WALK",
-            "NIGHT_VIEW",
-        }),
     ),
 
     DestinationZone(
@@ -37,13 +28,6 @@ DESTINATION_ZONES: List[DestinationZone] = [
         center_latitude=35.1631,
         center_longitude=129.1635,
         radius_meters=4000,
-        themes=frozenset({
-            "SEA",
-            "SEAFOOD",
-            "CAFE",
-            "WALK",
-            "NIGHT_VIEW",
-        }),
     ),
 
     DestinationZone(
@@ -52,12 +36,6 @@ DESTINATION_ZONES: List[DestinationZone] = [
         center_latitude=35.0787,
         center_longitude=129.0445,
         radius_meters=3500,
-        themes=frozenset({
-            "SEA",
-            "CAFE",
-            "WALK",
-            "CULTURE",
-        }),
     ),
 
     DestinationZone(
@@ -66,12 +44,6 @@ DESTINATION_ZONES: List[DestinationZone] = [
         center_latitude=35.0967,
         center_longitude=129.0306,
         radius_meters=2500,
-        themes=frozenset({
-            "SEAFOOD",
-            "FOOD",
-            "CULTURE",
-            "SHOPPING",
-        }),
     ),
 
     DestinationZone(
@@ -80,12 +52,6 @@ DESTINATION_ZONES: List[DestinationZone] = [
         center_latitude=35.1578,
         center_longitude=129.0592,
         radius_meters=2500,
-        themes=frozenset({
-            "FOOD",
-            "CAFE",
-            "SHOPPING",
-            "NIGHT_VIEW",
-        }),
     ),
 
     DestinationZone(
@@ -94,12 +60,6 @@ DESTINATION_ZONES: List[DestinationZone] = [
         center_latitude=35.0467,
         center_longitude=128.9658,
         radius_meters=3000,
-        themes=frozenset({
-            "SEA",
-            "WALK",
-            "NATURE",
-            "HEALING",
-        }),
     ),
 
     DestinationZone(
@@ -108,13 +68,6 @@ DESTINATION_ZONES: List[DestinationZone] = [
         center_latitude=35.1786,
         center_longitude=129.1997,
         radius_meters=4500,
-        themes=frozenset({
-            "SEA",
-            "SEAFOOD",
-            "FOOD",
-            "CAFE",
-            "WALK",
-        }),
     ),
 
     DestinationZone(
@@ -123,12 +76,6 @@ DESTINATION_ZONES: List[DestinationZone] = [
         center_latitude=35.2205,
         center_longitude=129.0811,
         radius_meters=3000,
-        themes=frozenset({
-            "HEALING",
-            "CULTURE",
-            "FOOD",
-            "WALK",
-        }),
     ),
 ]
 

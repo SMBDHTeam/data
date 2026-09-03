@@ -24,6 +24,21 @@ DEFAULT_ROLE_ORDER = [
     "CAFE",
     "NIGHT_VIEW",
 ]
+DEFAULT_COURSE_ROLE_ORDER = [
+    "ACTIVITY",
+    "MEAL",
+]
+OPTIONAL_ROLE_ORDER = [
+    "ACTIVITY",
+    "MEAL",
+    "CAFE",
+]
+ROLE_MAX_REQUIRED_STOPS = {
+    "ACTIVITY": None,
+    "MEAL": 1,
+    "CAFE": 1,
+    "NIGHT_VIEW": 1,
+}
 THEME_REQUIRED_ROLE_MAP = {
     "SEA": {"ACTIVITY"},
     "WALK": {"ACTIVITY"},
@@ -370,8 +385,14 @@ def calculate_place_score(
     distance = calculate_distance_meters(
         current_location,
         {
-            "latitude": place.get("latitude"),
-            "longitude": place.get("longitude"),
+            "latitude": (
+                place.get("latitude")
+                or place.get("mapy")
+            ),
+            "longitude": (
+                place.get("longitude")
+                or place.get("mapx")
+            ),
         },
     )
 
@@ -407,6 +428,7 @@ def select_best_place(
     role: str,
     current_location,
     required_themes: set[str] | None = None,
+    selected_place_keys: set[tuple] | None = None,
 ) -> dict | None:
     """
     역할별 후보 중
@@ -416,13 +438,21 @@ def select_best_place(
     if not places:
         return None
 
-    candidates = places
+    selected_place_keys = selected_place_keys or set()
+    candidates = [
+        place
+        for place in places
+        if get_place_identity(place) not in selected_place_keys
+    ]
     required_themes = required_themes or set()
+
+    if not candidates:
+        return None
 
     if required_themes:
         fully_matched = [
             place
-            for place in places
+            for place in candidates
             if required_themes.issubset(
                 get_place_themes(place)
             )
@@ -433,7 +463,7 @@ def select_best_place(
         else:
             partially_matched = [
                 place
-                for place in places
+                for place in candidates
                 if required_themes.intersection(
                     get_place_themes(place)
                 )
@@ -442,16 +472,160 @@ def select_best_place(
             if partially_matched:
                 candidates = partially_matched
 
-    return max(
+    return sorted(
         candidates,
-        key=lambda place:
-            calculate_place_score(
-                place,
-                desired_themes,
-                role,
-                current_location,
-            )
+        key=lambda place: place_ranking_key(
+            place,
+            desired_themes,
+            role,
+            current_location,
+        ),
+    )[0]
+
+
+def get_place_identity(
+    place: dict,
+) -> tuple:
+    content_id = (
+        place.get("contentId")
+        or place.get("contentid")
     )
+
+    if content_id:
+        return (
+            "contentId",
+            str(content_id),
+        )
+
+    latitude = (
+        place.get("latitude")
+        or place.get("mapy")
+    )
+    longitude = (
+        place.get("longitude")
+        or place.get("mapx")
+    )
+
+    try:
+        latitude_key = round(float(latitude), 6)
+        longitude_key = round(float(longitude), 6)
+    except (TypeError, ValueError):
+        latitude_key = str(latitude or "")
+        longitude_key = str(longitude or "")
+
+    return (
+        "place",
+        str(
+            place.get("contentTypeId")
+            or place.get("contenttypeid")
+            or ""
+        ),
+        str(
+            place.get("name")
+            or place.get("title")
+            or ""
+        ).strip(),
+        latitude_key,
+        longitude_key,
+    )
+
+
+def calculate_place_distance_for_ranking(
+    place: dict,
+    current_location,
+) -> float:
+    return calculate_distance_meters(
+        current_location,
+        {
+            "latitude": (
+                place.get("latitude")
+                or place.get("mapy")
+            ),
+            "longitude": (
+                place.get("longitude")
+                or place.get("mapx")
+            ),
+        },
+    )
+
+
+def place_ranking_key(
+    place: dict,
+    desired_themes: set[str],
+    role: str,
+    current_location,
+    remaining_themes: set[str] | None = None,
+) -> tuple:
+    place_themes = get_place_themes(
+        place
+    )
+    covered_count = 0
+
+    if remaining_themes is not None:
+        covered_count = len(
+            place_themes.intersection(
+                remaining_themes
+            )
+        )
+
+    place_score = calculate_place_score(
+        place,
+        desired_themes,
+        role,
+        current_location,
+    )
+    distance = calculate_place_distance_for_ranking(
+        place,
+        current_location,
+    )
+
+    return (
+        -covered_count,
+        -place_score,
+        distance,
+        str(
+            place.get("contentId")
+            or place.get("contentid")
+            or ""
+        ),
+        str(
+            place.get("name")
+            or place.get("title")
+            or ""
+        ),
+    )
+
+
+def select_best_covering_place(
+    places: list[dict],
+    desired_themes: set[str],
+    role: str,
+    current_location,
+    remaining_themes: set[str],
+    selected_place_keys: set[tuple],
+) -> dict | None:
+    candidates = [
+        place
+        for place in places
+        if get_place_identity(place) not in selected_place_keys
+        and get_place_themes(place).intersection(
+            remaining_themes
+        )
+    ]
+
+    if not candidates:
+        return None
+
+    return sorted(
+        candidates,
+        key=lambda place: place_ranking_key(
+            place,
+            desired_themes,
+            role,
+            current_location,
+            remaining_themes=remaining_themes,
+        ),
+    )[0]
 
 
 def get_required_roles(
@@ -545,14 +719,21 @@ def build_course_role_plan(
         if remaining_minutes is not None:
             remaining_minutes -= stay_minutes
 
-    for role in DEFAULT_ROLE_ORDER:
-        if role in required_roles:
+    if not required_roles:
+        for role in DEFAULT_COURSE_ROLE_ORDER:
             append_role(
                 role,
-                required=True,
+                required=False,
             )
+    else:
+        for role in DEFAULT_ROLE_ORDER:
+            if role in required_roles:
+                append_role(
+                    role,
+                    required=True,
+                )
 
-    for role in DEFAULT_ROLE_ORDER:
+    for role in OPTIONAL_ROLE_ORDER:
         if role not in required_roles:
             append_role(
                 role,
@@ -612,6 +793,129 @@ def has_required_theme_coverage(
     )
 
 
+def can_cover_required_themes_for_role(
+    places: list[dict],
+    role: str,
+    required_themes: set[str],
+) -> bool:
+    if not required_themes:
+        return True
+
+    if not places:
+        return False
+
+    max_stops = ROLE_MAX_REQUIRED_STOPS.get(
+        role,
+        1,
+    )
+
+    if max_stops == 1:
+        return any(
+            required_themes.issubset(
+                get_place_themes(place)
+            )
+            for place in places
+        )
+
+    remaining_themes = set(
+        required_themes
+    )
+    selected_place_keys: set[tuple] = set()
+    selected_count = 0
+
+    while remaining_themes:
+        if (
+            max_stops is not None
+            and selected_count >= max_stops
+        ):
+            return False
+
+        selected = None
+        selected_coverage: set[str] = set()
+
+        for place in places:
+            place_key = get_place_identity(
+                place
+            )
+
+            if place_key in selected_place_keys:
+                continue
+
+            coverage = get_place_themes(
+                place
+            ).intersection(
+                remaining_themes
+            )
+
+            if len(coverage) > len(selected_coverage):
+                selected = place
+                selected_coverage = coverage
+
+        if not selected or not selected_coverage:
+            return False
+
+        selected_place_keys.add(
+            get_place_identity(selected)
+        )
+        remaining_themes -= selected_coverage
+        selected_count += 1
+
+    return True
+
+
+def build_course_stop(
+    selected: dict,
+    order: int,
+    role: str,
+    stay_minutes: int,
+    desired_themes: set[str],
+    cursor_location,
+    required: bool,
+    covered_themes: set[str] | None = None,
+) -> dict:
+    return {
+        "order": order,
+        "role": role,
+        "name":
+            selected.get("name")
+            or selected.get("title"),
+        "contentId": (
+            selected.get("contentId")
+            or selected.get("contentid")
+        ),
+        "latitude": (
+            selected.get("latitude")
+            or selected.get("mapy")
+        ),
+        "longitude": (
+            selected.get("longitude")
+            or selected.get("mapx")
+        ),
+        "contentTypeId": (
+            selected.get("contentTypeId")
+            or selected.get("contenttypeid")
+        ),
+        "stayMinutes": stay_minutes,
+        "themes": sorted(
+            get_place_themes(selected)
+        ),
+        "score":
+            round(
+                calculate_place_score(
+                    selected,
+                    desired_themes,
+                    role,
+                    cursor_location,
+                ),
+                4
+            ),
+        "_required": required,
+        "_coveredThemes": sorted(
+            covered_themes or set()
+        ),
+    }
+
+
 
 def generate_course(
     grouped_places: dict[str, list[dict]],
@@ -628,6 +932,14 @@ def generate_course(
 
     course = []
     order = 1
+    selected_place_keys: set[tuple] = set()
+    required_themes_by_role = (
+        required_themes_by_role
+        if required_themes_by_role is not None
+        else get_required_themes_by_role(
+            desired_themes
+        )
+    )
 
     if hasattr(current_location, "latitude"):
         cursor_location = {
@@ -639,13 +951,9 @@ def generate_course(
 
 
     if role_plan is None:
-        patterns = [
-            (
-                role,
-                ROLE_STAY_MINUTES[role],
-            )
-            for role in DEFAULT_ROLE_ORDER
-        ]
+        patterns = build_course_role_plan(
+            desired_themes
+        )
     else:
         patterns = role_plan
 
@@ -661,68 +969,124 @@ def generate_course(
             continue
 
 
+        remaining_themes = set(
+            required_themes_by_role.get(
+                role,
+                set(),
+            )
+        )
+
+        if remaining_themes:
+            selected_count = 0
+            max_stops = ROLE_MAX_REQUIRED_STOPS.get(
+                role,
+                1,
+            )
+
+            while remaining_themes:
+                if (
+                    max_stops is not None
+                    and selected_count >= max_stops
+                ):
+                    break
+
+                selected = select_best_covering_place(
+                    places,
+                    desired_themes,
+                    role,
+                    cursor_location,
+                    remaining_themes,
+                    selected_place_keys,
+                )
+
+                if not selected:
+                    break
+
+                covered_themes = get_place_themes(
+                    selected
+                ).intersection(
+                    remaining_themes
+                )
+
+                course.append(
+                    build_course_stop(
+                        selected,
+                        order,
+                        role,
+                        stay_minutes,
+                        desired_themes,
+                        cursor_location,
+                        required=True,
+                        covered_themes=covered_themes,
+                    )
+                )
+                selected_place_keys.add(
+                    get_place_identity(selected)
+                )
+                cursor_location = {
+                    "latitude": selected.get("latitude"),
+                    "longitude": selected.get("longitude"),
+                }
+                remaining_themes -= covered_themes
+                selected_count += 1
+                order += 1
+
+            continue
+
         selected = select_best_place(
             places,
             desired_themes,
             role,
             cursor_location,
-            required_themes=(
-                required_themes_by_role or {}
-            ).get(
-                role,
-                set(),
-            ),
+            selected_place_keys=selected_place_keys,
         )
-
 
         if not selected:
             continue
 
-
         course.append(
-            {
-                "order": order,
-                "role": role,
-                "name":
-                    selected.get("name")
-                    or selected.get("title"),
-                "contentId": selected.get("contentId"),
-                "latitude": selected.get("latitude"),
-                "longitude": selected.get("longitude"),
-                "contentTypeId": selected.get("contentTypeId"),
-
-                "stayMinutes": stay_minutes,
-
-                "themes": list(
-                    selected.get(
-                        "themes",
-                        set()
-                    )
-                ),
-
-                "score":
-                    round(
-                        calculate_place_score(
-                            selected,
-                            desired_themes,
-                            role,
-                            cursor_location,
-                        ),
-                        4
-                    ),
-            }
+            build_course_stop(
+                selected,
+                order,
+                role,
+                stay_minutes,
+                desired_themes,
+                cursor_location,
+                required=False,
+            )
         )
 
+        selected_place_keys.add(
+            get_place_identity(selected)
+        )
         cursor_location = {
             "latitude": selected.get("latitude"),
             "longitude": selected.get("longitude"),
         }
-
-
         order += 1
 
 
     return course
+
+
+def remove_last_optional_stop(
+    course: list[dict],
+) -> list[dict] | None:
+    for index in range(
+        len(course) - 1,
+        -1,
+        -1,
+    ):
+        if not course[index].get(
+            "_required",
+            False,
+        ):
+            return normalize_course_orders(
+                course[:index]
+                + course[index + 1:]
+            )
+
+    return None
 
 def calculate_course_travel_minutes(
     course: list[dict],

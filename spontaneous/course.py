@@ -4,7 +4,10 @@ from math import asin, cos, radians, sin, sqrt
 
 from spontaneous.models import Coordinate, TransportMode
 from spontaneous.places import SEAFOOD_MENU_KEYWORDS
-from spontaneous.routing import TravelMinutesCache, search_travel_minutes
+from spontaneous.routing import (
+    RouteResultCache,
+    search_route,
+)
 
 
 EARTH_RADIUS_METERS = 6371000
@@ -1088,23 +1091,24 @@ def remove_last_optional_stop(
 
     return None
 
-def calculate_course_travel_minutes(
+def calculate_sequential_course_timeline(
     course: list[dict],
-    current_location: Coordinate,
+    start_location: Coordinate,
     transport_mode: TransportMode,
-    cache: TravelMinutesCache | None = None,
-) -> list[dict]:
+    start_at: datetime,
+    cache: RouteResultCache | None = None,
+) -> dict:
     """
-    현재 위치 -> 장소1 -> 장소2 -> ... -> 현재 위치
-    각 구간의 실제 이동시간을 계산한다.
+    Route each course leg in order and use each stop departure as the next
+    route's requested departure time.
     """
 
     if not course:
-        return []
+        raise ValueError("COURSE_NOT_FEASIBLE")
 
-    result = []
-
-    previous_location = current_location
+    cursor_location = start_location
+    cursor_time = start_at
+    timeline = []
 
     for item in course:
         place_location = Coordinate(
@@ -1112,99 +1116,48 @@ def calculate_course_travel_minutes(
             longitude=item["longitude"],
         )
 
-        travel_minutes = search_travel_minutes(
+        route = search_route(
             transport_mode,
-            previous_location,
+            cursor_location,
             place_location,
+            cursor_time,
             cache=cache,
         )
 
-        item_with_travel = {
-            **item,
-            "travelMinutesFromPrevious": travel_minutes,
-        }
-
-        result.append(item_with_travel)
-
-        previous_location = place_location
-
-    return_minutes = search_travel_minutes(
-        transport_mode,
-        previous_location,
-        current_location,
-        cache=cache,
-    )
-
-    if result:
-        result[-1]["returnTravelMinutes"] = return_minutes
-
-    return result
-
-
-def has_complete_travel_minutes(
-    course: list[dict],
-) -> bool:
-    if not course:
-        return False
-
-    for item in course:
-        if item.get("travelMinutesFromPrevious") is None:
-            return False
-
-    return course[-1].get("returnTravelMinutes") is not None
-
-
-def apply_course_timeline(
-    course: list[dict],
-    start_at: datetime,
-) -> dict:
-    """
-    Adds arrival/departure timestamps and computes the final return time.
-    """
-
-    current_time = start_at
-    timeline = []
-
-    for item in course:
-        travel_minutes = item.get(
-            "travelMinutesFromPrevious"
-        )
-
-        if travel_minutes is None:
+        if route is None:
             raise ValueError("NO_ROUTE")
 
-        arrival_at = current_time + timedelta(
-            minutes=travel_minutes
-        )
-
-        departure_at = arrival_at + timedelta(
+        departure_at = route.arrivalAt + timedelta(
             minutes=item["stayMinutes"]
         )
 
-        item_with_timeline = {
-            **item,
-            "arrivalAt": arrival_at.isoformat(),
-            "departureAt": departure_at.isoformat(),
-        }
+        timeline.append(
+            {
+                **item,
+                "travelMinutesFromPrevious": route.travelMinutes,
+                "arrivalAt": route.arrivalAt.isoformat(),
+                "departureAt": departure_at.isoformat(),
+            }
+        )
 
-        timeline.append(item_with_timeline)
-        current_time = departure_at
+        cursor_location = place_location
+        cursor_time = departure_at
 
-    return_travel_minutes = timeline[-1].get(
-        "returnTravelMinutes"
+    return_route = search_route(
+        transport_mode,
+        cursor_location,
+        start_location,
+        cursor_time,
+        cache=cache,
     )
 
-    if return_travel_minutes is None:
+    if return_route is None:
         raise ValueError("NO_ROUTE")
-
-    estimated_return_at = current_time + timedelta(
-        minutes=return_travel_minutes
-    )
 
     return {
         "course": timeline,
-        "returnTravelMinutes": return_travel_minutes,
-        "estimatedReturnAt": estimated_return_at,
+        "returnTravelMinutes": return_route.travelMinutes,
+        "estimatedReturnAt": return_route.arrivalAt,
     }
 
 

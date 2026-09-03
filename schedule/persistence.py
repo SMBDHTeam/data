@@ -86,6 +86,23 @@ def normalize_category_label(raw_label: str | None, content_type_id: str | None)
     return normalized
 
 
+def normalize_transit_provider(provider: str | None) -> str | None:
+    normalized = (provider or "").strip().upper()
+    if normalized in {"", "TMAP", "INTERNAL_WALK", "FASTAPI_MIGRATION"}:
+        return None
+    return provider
+
+
+def normalize_route_line_name(mode: str | None, line_name: str | None) -> str | None:
+    normalized_mode = (mode or "").strip().upper()
+    normalized_name = (line_name or "").strip()
+    if normalized_mode == "WALK" and normalized_name in {"TMAP 보행 경로", "Migration Skeleton"}:
+        return "도보 이동"
+    if normalized_name == "Migration Skeleton":
+        return "이동 경로"
+    return line_name
+
+
 def connect():
     dsn, username, password = resolve_db_dsn()
     if not dsn:
@@ -695,7 +712,7 @@ def route_to_model(row: dict[str, Any] | None) -> ScheduleTransit | None:
         ScheduleSegment(
             order=segment["segment_order"],
             mode=segment["mode"],
-            lineName=segment["line_name"],
+            lineName=normalize_route_line_name(segment["mode"], segment["line_name"]),
             startStationId=segment["start_station_id"],
             startStationName=segment["start_station_name"],
             endStationId=segment["end_station_id"],
@@ -716,7 +733,7 @@ def route_to_model(row: dict[str, Any] | None) -> ScheduleTransit | None:
             "routeOrder": row["route_order"],
             "lineOrder": line["line_order"],
             "mode": line["mode"],
-            "lineName": line["line_name"],
+            "lineName": normalize_route_line_name(line["mode"], line["line_name"]),
             "startName": None,
             "endName": None,
             "durationMinutes": line["duration_minutes"],
@@ -741,7 +758,7 @@ def route_to_model(row: dict[str, Any] | None) -> ScheduleTransit | None:
             "waitMinutes": raw.get("waitMinutes", 0),
             "transferCount": raw.get("transferCount", 0),
             "fareAmount": row["fare_amount"],
-            "provider": row["provider"],
+            "provider": normalize_transit_provider(row["provider"]),
             "realtimeStatus": row["realtime_status"],
             "fallbackUsed": row["fallback_used"],
             "segments": [dump_model(segment) for segment in segments],

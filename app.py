@@ -97,6 +97,7 @@ from spontaneous.course import (
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"
+PUBLIC_TRANSIT_DESTINATION_CANDIDATE_LIMIT = 2
 
 SELECTED_NUMERIC_COLS = [
     "mapx",
@@ -660,9 +661,16 @@ def recommend_spontaneous_destinations(
         ),
     )
 
+    if request.transportMode == TransportMode.PUBLIC_TRANSIT:
+        routing_candidates = candidates[:PUBLIC_TRANSIT_DESTINATION_CANDIDATE_LIMIT]
+        recommendation_limit = PUBLIC_TRANSIT_DESTINATION_CANDIDATE_LIMIT
+    else:
+        routing_candidates = candidates
+        recommendation_limit = MAX_DESTINATION_RECOMMENDATIONS
+
     results = []
-    for candidate in candidates:
-        if len(results) >= MAX_DESTINATION_RECOMMENDATIONS:
+    for candidate in routing_candidates:
+        if len(results) >= recommendation_limit:
             break
 
         zone = candidate["zone"]
@@ -739,7 +747,7 @@ def recommend_spontaneous_destinations(
         raise HTTPException(status_code=404, detail="DESTINATIONS_NOT_FOUND")
 
     return SpontaneousDestinationResponse(
-        destinations=results[:MAX_DESTINATION_RECOMMENDATIONS]
+        destinations=results[:recommendation_limit]
     )
 
 

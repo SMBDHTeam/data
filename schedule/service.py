@@ -1617,11 +1617,15 @@ def policy_target_count(available_minutes: int, request: ScheduleCreateRequest) 
             return 4
         return 3
     if has_answer(request, "PACE_RELAXED"):
+        if available_minutes >= 600:
+            return 5
         if available_minutes >= 480:
             return 4
         if available_minutes >= 360:
             return 3
         return 2
+    if available_minutes >= 600:
+        return 5
     if available_minutes >= 480:
         return 4
     if available_minutes >= 360:
@@ -2008,7 +2012,12 @@ def day_underfilled(day: ScheduleDay) -> bool:
         return False
     used = day_used_minutes(day)
     unused = available - used
-    return unused >= EARLY_FINISH_BUFFER_MINUTES and used < int(available * MIN_DAY_UTILIZATION_RATIO)
+    min_utilization_ratio = MIN_DAY_UTILIZATION_RATIO
+    early_finish_buffer_minutes = EARLY_FINISH_BUFFER_MINUTES
+    if available >= 600:
+        min_utilization_ratio = 0.75
+        early_finish_buffer_minutes = 120
+    return unused >= early_finish_buffer_minutes and used < int(available * min_utilization_ratio)
 
 
 def move_last_optional_stop(

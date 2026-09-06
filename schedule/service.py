@@ -52,6 +52,7 @@ DEFAULT_PLANNING_WARNINGS = [
     "일부 장소 정보는 운영시간과 상세 안내를 방문 전에 다시 확인해 주세요.",
     "일부 도보 구간은 실시간 보행 장애 정보가 반영되지 않을 수 있습니다.",
 ]
+STOP_INFO_WARNING = "운영시간과 상세 안내는 방문 전에 다시 확인해 주세요."
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CANDIDATE_PLACES_PATH = BASE_DIR / "candidate_places.json"
@@ -919,9 +920,7 @@ def candidate_stop(
         selectionReasons=selection_reasons,
         fixedStartsAt=fixed_starts_at,
         fixedEndsAt=fixed_ends_at,
-        warnings=[
-            "운영시간과 상세 안내는 방문 전에 다시 확인해 주세요.",
-        ],
+        warnings=[STOP_INFO_WARNING],
     )
 
 
@@ -1233,7 +1232,7 @@ def build_inbound_transit(origin_name: str | None, destination_name: str, transi
         waitMinutes=0,
         transferCount=0,
         fareAmount=None,
-        provider="FASTAPI_MIGRATION",
+        provider=None,
         realtimeStatus="UNAVAILABLE",
         fallbackUsed=True,
         segments=[],
@@ -1673,18 +1672,30 @@ def selection_reasons(
 ) -> list[str]:
     reasons: list[str] = []
     if place_id is not None:
-        reasons.append("must_visit_seed")
+        reasons.append("직접 선택한 방문지입니다.")
     else:
-        reasons.append("daily_target_fill")
+        reasons.append("선택한 여행 조건에 맞춰 추천한 방문지입니다.")
     if is_fixed_event:
-        reasons.append("fixed_event")
+        reasons.append("고정 일정 시간을 반영했습니다.")
     if theme_answer_id is not None:
-        reasons.append(f"theme:{theme_answer_id}")
+        reasons.append(theme_selection_reason(theme_answer_id))
     if has_answer(request, "PACE_PACKED"):
-        reasons.append("pace:packed")
+        reasons.append("알찬 일정 선호를 반영했습니다.")
     if has_answer(request, "PACE_RELAXED"):
-        reasons.append("pace:relaxed")
+        reasons.append("여유로운 일정 선호를 반영했습니다.")
     return reasons
+
+
+def theme_selection_reason(theme_answer_id: str) -> str:
+    labels = {
+        "THEME_FOOD": "맛집 테마와 어울리는 장소입니다.",
+        "THEME_NATURE": "자연 테마와 어울리는 장소입니다.",
+        "THEME_CULTURE": "문화·역사 테마와 어울리는 장소입니다.",
+        "THEME_ACTIVITY": "액티비티 테마와 어울리는 장소입니다.",
+        "THEME_SHOPPING": "쇼핑 테마와 어울리는 장소입니다.",
+        "THEME_HEALING": "힐링 테마와 어울리는 장소입니다.",
+    }
+    return labels.get(theme_answer_id, "선택한 테마와 어울리는 장소입니다.")
 
 
 def resolve_place_or_400(place_id: int) -> CandidatePlace:
@@ -2029,7 +2040,7 @@ def move_last_optional_stop(
     source_day = repaired[source_index]
     movable_stops = [
         stop for stop in reversed(source_day.stops)
-        if stop.fixed_starts_at is None and "must_visit_seed" not in stop.selection_reasons
+        if stop.fixed_starts_at is None and "직접 선택한 방문지입니다." not in stop.selection_reasons
     ]
     if not movable_stops:
         return None

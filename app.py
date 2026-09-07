@@ -65,6 +65,7 @@ from spontaneous.service import (
     calculate_final_destination_score,
     calculate_zone_theme_score,
     has_coarse_course_viability,
+    select_weighted_destination_candidates,
 )
 
 from spontaneous.routing import (
@@ -662,11 +663,15 @@ def recommend_spontaneous_destinations(
     )
 
     if request.transportMode == TransportMode.PUBLIC_TRANSIT:
-        routing_candidates = candidates[:PUBLIC_TRANSIT_DESTINATION_CANDIDATE_LIMIT]
         recommendation_limit = PUBLIC_TRANSIT_DESTINATION_CANDIDATE_LIMIT
     else:
-        routing_candidates = candidates
         recommendation_limit = MAX_DESTINATION_RECOMMENDATIONS
+
+    # Select once before routing; PUBLIC_TRANSIT remains capped at two round trips.
+    routing_candidates = select_weighted_destination_candidates(
+        candidates,
+        limit=recommendation_limit,
+    )
 
     results = []
     for candidate in routing_candidates:

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from random import Random
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -14,7 +15,10 @@ from spontaneous.models import (
     TransportOption,
 )
 from spontaneous.routing import RouteResult
-from spontaneous.service import MAX_DESTINATION_RECOMMENDATIONS
+from spontaneous.service import (
+    DESTINATION_SELECTION_POOL_LIMIT,
+    MAX_DESTINATION_RECOMMENDATIONS,
+)
 
 
 KST = timezone(timedelta(hours=9))
@@ -70,6 +74,9 @@ def successful_transport(mode: TransportMode) -> TransportOption:
 
 class SpontaneousDestinationRoutingLimitTest(TestCase):
     def setUp(self):
+        self.rng_patch = patch("spontaneous.service.random", Random(1))
+        self.rng_patch.start()
+        self.addCleanup(self.rng_patch.stop)
         self.zones = make_zones()
         self.zone_by_coordinate = {
             (
@@ -120,7 +127,7 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
 
         return calls, fake_get_transport_option
 
-    def test_public_transit_routes_only_top_two_candidates_and_returns_two(self):
+    def test_public_transit_routes_only_two_selected_candidates_and_returns_two(self):
         get_transport_calls = []
         search_route_calls = []
         tmap_transit_calls = []
@@ -228,7 +235,10 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
                 )
 
         self.assertEqual(len(response.destinations), MAX_DESTINATION_RECOMMENDATIONS)
-        self.assertEqual(calls, ["ZONE_1", "ZONE_2", "ZONE_3", "ZONE_4", "ZONE_5"])
+        self.assertEqual(len(calls), MAX_DESTINATION_RECOMMENDATIONS)
+        self.assertEqual(calls[0], "ZONE_1")
+        self.assertEqual(len(set(calls)), len(calls))
+        self.assertTrue(set(calls).issubset({f"ZONE_{i}" for i in range(1, 7)}))
 
     def test_walk_still_returns_existing_recommendation_limit(self):
         calls, fake_get_transport_option = self.get_transport_call_counter({})
@@ -240,7 +250,10 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
                 )
 
         self.assertEqual(len(response.destinations), MAX_DESTINATION_RECOMMENDATIONS)
-        self.assertEqual(calls, ["ZONE_1", "ZONE_2", "ZONE_3", "ZONE_4", "ZONE_5"])
+        self.assertEqual(len(calls), MAX_DESTINATION_RECOMMENDATIONS)
+        self.assertEqual(calls[0], "ZONE_1")
+        self.assertEqual(len(set(calls)), len(calls))
+        self.assertTrue(set(calls).issubset({f"ZONE_{i}" for i in range(1, 7)}))
 
     def test_public_response_shape_does_not_expose_internal_score(self):
         calls, fake_get_transport_option = self.get_transport_call_counter({})
@@ -266,7 +279,7 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
         )
         self.assertNotIn("score", payload["destinations"][0])
 
-    def test_pre_ranking_order_is_deterministic_before_routing_limit(self):
+    def test_seeded_pre_ranking_selection_is_deterministic(self):
         calls, fake_get_transport_option = self.get_transport_call_counter(
             {"ZONE_1": "NO_ROUTE", "ZONE_2": "NO_ROUTE"}
         )
@@ -279,6 +292,93 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
                     )
 
         self.assertEqual(calls, ["ZONE_1", "ZONE_2"])
+
+    def test_all_modes_keep_leader_and_vary_unique_routing_candidates(self):
+        for mode in TransportMode:
+            selections = set()
+            for seed in range(20):
+                with self.subTest(mode=mode, seed=seed):
+                    calls, provider = self.get_transport_call_counter({})
+                    with self.patch_preranking(), patch(
+                        "spontaneous.service.random", Random(seed)
+                    ), patch("app.get_transport_option", side_effect=provider):
+                        response = data_app.recommend_spontaneous_destinations(request(mode))
+
+                    limit = 2 if mode == TransportMode.PUBLIC_TRANSIT else 5
+                    self.assertEqual(len(calls), limit)
+                    self.assertEqual(calls[0], "ZONE_1")
+                    ids = [item.destinationId for item in response.destinations]
+                    self.assertIn("ZONE_1", ids)
+                    self.assertEqual(len(ids), len(set(ids)))
+                    self.assertEqual(set(ids), set(calls))
+                    self.assertTrue(all(
+                        int(zone_id.rsplit("_", 1)[1]) <= DESTINATION_SELECTION_POOL_LIMIT
+                        for zone_id in calls
+                    ))
+                    selections.add(frozenset(ids))
+            self.assertGreater(len(selections), 1)
+
+    def test_duplicate_destination_ids_are_routed_and_returned_only_once(self):
+        self.zones.insert(1, self.zones[0])
+        calls, provider = self.get_transport_call_counter({})
+        with self.patch_preranking(), patch("app.get_transport_option", side_effect=provider):
+            response = data_app.recommend_spontaneous_destinations(request(TransportMode.CAR))
+
+        ids = [item.destinationId for item in response.destinations]
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), len(set(calls)))
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_public_transit_missing_return_route_is_excluded_without_replacement(self):
+        def provider(origin, destination, departure_at, cache=None):
+            if self.zone_by_coordinate.get(coordinate_key(origin)) == "ZONE_2":
+                return None
+            return routing.route_result_from_minutes(
+                mode=TransportMode.PUBLIC_TRANSIT,
+                provider="TMAP_TRANSIT",
+                travel_minutes=10,
+                departure_at=departure_at,
+            )
+
+        with self.patch_preranking(), patch(
+            "spontaneous.routing.search_tmap_transit_route", side_effect=provider
+        ) as tmap:
+            response = data_app.recommend_spontaneous_destinations(
+                request(TransportMode.PUBLIC_TRANSIT)
+            )
+
+        self.assertEqual([item.destinationId for item in response.destinations], ["ZONE_1"])
+        self.assertEqual(tmap.call_count, 4)
+
+    def test_public_transit_stay_time_boundary_preserves_four_call_limit(self):
+        def provider(origin, destination, departure_at, cache=None):
+            return routing.route_result_from_minutes(
+                mode=TransportMode.PUBLIC_TRANSIT,
+                provider="TMAP_TRANSIT",
+                travel_minutes=10,
+                departure_at=departure_at,
+            )
+
+        for total_minutes in (79, 80):
+            with self.subTest(total_minutes=total_minutes):
+                payload = request(TransportMode.PUBLIC_TRANSIT)
+                payload.returnBy = payload.startAt + timedelta(minutes=total_minutes)
+                with self.patch_preranking(), patch(
+                    "spontaneous.routing.search_tmap_transit_route", side_effect=provider
+                ) as tmap:
+                    if total_minutes == 79:
+                        with self.assertRaises(HTTPException) as error:
+                            data_app.recommend_spontaneous_destinations(payload)
+                        self.assertEqual(error.exception.status_code, 404)
+                        self.assertEqual(error.exception.detail, "DESTINATIONS_NOT_FOUND")
+                    else:
+                        response = data_app.recommend_spontaneous_destinations(payload)
+                        self.assertEqual(len(response.destinations), 2)
+                        self.assertTrue(all(
+                            item.transport.availableStayMinutes == routing.MIN_STAY_MINUTES
+                            for item in response.destinations
+                        ))
+                self.assertEqual(tmap.call_count, 4)
 
 
 if __name__ == "__main__":

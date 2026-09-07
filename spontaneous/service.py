@@ -1,5 +1,6 @@
 # 현재 위치 기준 권역 ㅊㅊ로직
 
+import random
 from math import asin, cos, radians, sin, sqrt
 
 from spontaneous.destinations import DESTINATION_ZONES, DestinationZone
@@ -20,6 +21,7 @@ DESTINATION_FINAL_THEME_WEIGHT = 0.7
 DESTINATION_FINAL_TRAVEL_WEIGHT = 0.2
 DESTINATION_FINAL_STAY_WEIGHT = 0.1
 MAX_DESTINATION_RECOMMENDATIONS = 5
+DESTINATION_SELECTION_POOL_LIMIT = 6
 
 
 def distance_meters(origin: Coordinate, destination: Coordinate) -> float:
@@ -175,12 +177,59 @@ def calculate_zone_theme_score(
     if not desired_themes:
         return 0.0
 
-    desired_set = {theme.upper() for theme in desired_themes}
-    matched = desired_set.intersection(
-        collect_zone_theme_evidence(places)
-    )
+    candidate_themes = [
+        infer_place_themes(place)
+        for place in filter_course_candidates(places)
+    ]
+    if not candidate_themes:
+        return 0.0
 
-    return len(matched) / len(desired_set)
+    desired_set = {theme.upper() for theme in desired_themes}
+    strengths = []
+    for theme in sorted(desired_set):
+        matched_count = sum(theme in themes for themes in candidate_themes)
+        coverage_ratio = matched_count / len(candidate_themes)
+        volume_score = min(1.0, matched_count / 5.0)
+        strengths.append(coverage_ratio * 0.7 + volume_score * 0.3)
+
+    return max(0.0, min(1.0, sum(strengths) / len(strengths)))
+
+
+def select_weighted_destination_candidates(
+    candidates: list[dict],
+    limit: int,
+    rng: random.Random | None = None,
+) -> list[dict]:
+    """Keep the pre-ranked leader and sample distinct destinations from the top six.
+
+    Candidates must already be sorted by descending pre-score. Selection happens
+    before routing, so an unavailable route never triggers a replacement draw.
+    """
+    if limit <= 0:
+        return []
+
+    pool = []
+    seen_ids = set()
+    for candidate in candidates:
+        destination_id = candidate["zone"].destination_id
+        if destination_id in seen_ids:
+            continue
+        seen_ids.add(destination_id)
+        pool.append(candidate)
+        if len(pool) >= DESTINATION_SELECTION_POOL_LIMIT:
+            break
+
+    if not pool:
+        return []
+
+    selected = [pool.pop(0)]
+    chooser = rng if rng is not None else random
+    while pool and len(selected) < limit:
+        weights = [max(candidate["score"], 0.01) ** 3 for candidate in pool]
+        index = chooser.choices(range(len(pool)), weights=weights, k=1)[0]
+        selected.append(pool.pop(index))
+
+    return selected
 
 
 def calculate_distance_score(distance_meters_value: float) -> float:

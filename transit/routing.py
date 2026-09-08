@@ -233,7 +233,6 @@ def odsay_path_to_models(
                 coordinates = [line_start, line_end]
             elif tmap_route is None and should_use_tmap_walking(distance):
                 fallback_used = True
-            warnings.append("도보 경로는 실시간 보행 장애 정보를 반영하지 않습니다.")
         elif not coordinates:
             fallback_used = True
             line_start = previous_line_end
@@ -319,7 +318,7 @@ def walk_fallback_transit(
                 realtimeStatus="UNAVAILABLE",
             )
         ],
-        warnings=["도보 경로는 실시간 보행 장애 정보를 반영하지 않습니다."],
+        warnings=[],
     )
 
 
@@ -362,7 +361,7 @@ def tmap_walk_transit(
                 realtimeStatus="UNAVAILABLE",
             )
         ],
-        warnings=["도보 경로는 실시간 보행 장애 정보를 반영하지 않습니다."],
+        warnings=[],
     )
 
 

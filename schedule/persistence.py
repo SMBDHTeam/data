@@ -107,6 +107,13 @@ def is_user_selected_stop(selection_reasons: list[str]) -> bool:
     return any(reason in {"must_visit_seed", "직접 선택한 방문지입니다.", "update_requested_place"} for reason in selection_reasons)
 
 
+def normalize_transit_warnings(warnings: list[str]) -> list[str]:
+    hidden_repeated_warnings = {
+        "도보 경로는 실시간 보행 장애 정보를 반영하지 않습니다.",
+    }
+    return [warning for warning in warnings if warning not in hidden_repeated_warnings]
+
+
 def connect():
     dsn, username, password = resolve_db_dsn()
     if not dsn:
@@ -768,7 +775,7 @@ def route_to_model(row: dict[str, Any] | None) -> ScheduleTransit | None:
             "realtimeStatus": row["realtime_status"],
             "fallbackUsed": row["fallback_used"],
             "segments": [dump_model(segment) for segment in segments],
-            "warnings": json.loads(row["warnings_json"] or "[]"),
+            "warnings": normalize_transit_warnings(json.loads(row["warnings_json"] or "[]")),
             "route_lines": route_lines,
         }
     )

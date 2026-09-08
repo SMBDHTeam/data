@@ -139,7 +139,7 @@ class WeightedDestinationSelectionTest(TestCase):
             self.assertTrue(set(self.selected_ids(seed)).issubset(allowed))
         self.assertEqual(len(self.selected_ids(0, limit=100)), DESTINATION_SELECTION_POOL_LIMIT)
 
-    def test_cubed_weights_favor_higher_scores(self):
+    def test_squared_weights_favor_higher_scores_without_cubed_concentration(self):
         candidates = [
             {"zone": DESTINATION_ZONES[0], "score": 1.0},
             {"zone": DESTINATION_ZONES[1], "score": 0.8},
@@ -150,9 +150,9 @@ class WeightedDestinationSelectionTest(TestCase):
             self.selected_ids(seed, limit=2, candidates=candidates)[1] == high_id
             for seed in range(1000)
         )
-        # Cubing yields an 8:1 ratio, rather than the 2:1 ratio of linear weights.
-        self.assertGreater(high_count, 850)
-        self.assertLess(high_count, 930)
+        # Squaring yields 4:1 odds (80%), between linear (67%) and cubed (89%).
+        self.assertGreater(high_count, 750)
+        self.assertLess(high_count, 850)
 
     def test_zero_scores_still_allow_sampling(self):
         candidates = [{**candidate, "score": 0.0} for candidate in self.candidates]

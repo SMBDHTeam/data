@@ -1110,7 +1110,7 @@ def calculate_sequential_course_timeline(
     cursor_time = start_at
     timeline = []
 
-    for item in course:
+    for index, item in enumerate(course):
         place_location = Coordinate(
             latitude=item["latitude"],
             longitude=item["longitude"],
@@ -1125,7 +1125,7 @@ def calculate_sequential_course_timeline(
         )
 
         if route is None:
-            raise ValueError("NO_ROUTE")
+            raise CourseTimelineError("NO_ROUTE", index)
 
         departure_at = route.arrivalAt + timedelta(
             minutes=item["stayMinutes"]
@@ -1152,13 +1152,21 @@ def calculate_sequential_course_timeline(
     )
 
     if return_route is None:
-        raise ValueError("NO_ROUTE")
+        raise CourseTimelineError("NO_ROUTE", len(course) - 1)
 
     return {
         "course": timeline,
         "returnTravelMinutes": return_route.travelMinutes,
         "estimatedReturnAt": return_route.arrivalAt,
     }
+
+
+class CourseTimelineError(ValueError):
+    """A candidate-specific routing failure, with the stop to replace first."""
+
+    def __init__(self, reason: str, stop_index: int):
+        super().__init__(reason)
+        self.stop_index = stop_index
 
 
 def normalize_course_orders(

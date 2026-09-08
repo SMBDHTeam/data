@@ -208,6 +208,7 @@ class ScheduleStop(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     fixed_starts_at: datetime | None = Field(default=None, alias="fixedStartsAt")
     fixed_ends_at: datetime | None = Field(default=None, alias="fixedEndsAt")
+    user_selected: bool = Field(default=False, exclude=True)
 
 
 class DayLocation(BaseModel):

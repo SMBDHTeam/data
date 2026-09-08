@@ -646,7 +646,8 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
                     order=patch_stop.order,
                     stay_minutes=patch_stop.stay_minutes,
                     candidate=resolve_place_or_400(patch_stop.place_id),
-                    selection_reasons=["update_requested_place"],
+                    selection_reasons=["직접 선택한 방문지입니다."],
+                    user_selected=True,
                 )
             )
 
@@ -870,6 +871,7 @@ def build_stops(
                 stay_minutes=max(MIN_STAY_MINUTES, int((depart_dt - arrive_dt).total_seconds() // 60)),
                 candidate=candidate,
                 selection_reasons=stop_selection_reasons,
+                user_selected=candidate.id in must_visit_ids,
                 arrive_at=arrive_dt.time(),
                 depart_at=depart_dt.time(),
                 inbound_transit=inbound_transit,
@@ -889,6 +891,7 @@ def candidate_stop(
     stay_minutes: int,
     candidate: CandidatePlace,
     selection_reasons: list[str],
+    user_selected: bool = False,
     arrive_at: time | None = None,
     depart_at: time | None = None,
     inbound_transit: ScheduleTransit | None = None,
@@ -920,6 +923,7 @@ def candidate_stop(
         selectionReasons=selection_reasons,
         fixedStartsAt=fixed_starts_at,
         fixedEndsAt=fixed_ends_at,
+        user_selected=user_selected,
         warnings=[STOP_INFO_WARNING],
     )
 
@@ -2040,7 +2044,7 @@ def move_last_optional_stop(
     source_day = repaired[source_index]
     movable_stops = [
         stop for stop in reversed(source_day.stops)
-        if stop.fixed_starts_at is None and "직접 선택한 방문지입니다." not in stop.selection_reasons
+        if stop.fixed_starts_at is None and not stop.user_selected
     ]
     if not movable_stops:
         return None

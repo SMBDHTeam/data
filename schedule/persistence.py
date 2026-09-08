@@ -103,6 +103,10 @@ def normalize_route_line_name(mode: str | None, line_name: str | None) -> str | 
     return line_name
 
 
+def is_user_selected_stop(selection_reasons: list[str]) -> bool:
+    return any(reason in {"must_visit_seed", "직접 선택한 방문지입니다.", "update_requested_place"} for reason in selection_reasons)
+
+
 def connect():
     dsn, username, password = resolve_db_dsn()
     if not dsn:
@@ -642,6 +646,7 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
         )
         fixed = fixed_rows.get(row["id"])
         inbound = route_to_model(routes_by_stop.get(row["id"]))
+        selection_reasons = json.loads(row["selection_reasons_json"] or "[]")
         stop = ScheduleStop(
             id=row["id"],
             order=row["stop_order"],
@@ -651,10 +656,11 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
             departAt=row.get("depart_at"),
             place=place,
             inboundTransit=inbound,
-            selectionReasons=json.loads(row["selection_reasons_json"] or "[]"),
+            selectionReasons=selection_reasons,
             warnings=json.loads(row["warnings_json"] or "[]"),
             fixedStartsAt=fixed["starts_at"] if fixed else row["fixed_starts_at"],
             fixedEndsAt=fixed["ends_at"] if fixed else row["fixed_ends_at"],
+            user_selected=is_user_selected_stop(selection_reasons),
         )
         stops_by_day.setdefault(row["schedule_day_id"], []).append(stop)
 

@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from unittest import TestCase
 from unittest.mock import patch
@@ -12,7 +12,13 @@ from urllib.parse import parse_qs, urlparse
 import app as data_app
 from spontaneous.course import calculate_sequential_course_timeline, group_places_by_role
 from spontaneous.models import TransportMode
-from spontaneous.places import base_course_place, convert_to_course_place, search_food_detail
+from spontaneous.places import (
+    base_course_place,
+    convert_to_course_place,
+    is_course_place_open_for_visit,
+    is_open_now,
+    search_food_detail,
+)
 from spontaneous.planner import MAX_CANDIDATES_PER_ROLE, MAX_COURSE_ATTEMPTS
 from spontaneous.routing import route_cache_key, route_result_from_minutes
 from spontaneous.service import coarse_course_place, has_coarse_course_viability
@@ -359,6 +365,88 @@ class SpontaneousCourseFallbackTest(TestCase):
             request["destinationId"] = recommendation["destinations"][0]["destinationId"]
             self.assert_success(post_json(COURSE_URL, request), ["a1", "c2"])
         self.assertEqual(calls["timeline"].call_count, 2)
+
+    def test_equivalent_korea_and_utc_course_requests_select_same_cafe(self):
+        cafe = place("c1")
+
+        def car_route(mode, origin, destination, departure_at, cache=None):
+            travel_minutes = 48 if coordinate_key(origin) == coordinate_key(START) else 10
+            return route_result_from_minutes(
+                mode=mode,
+                provider="TMAP",
+                travel_minutes=travel_minutes,
+                departure_at=departure_at,
+            )
+
+        request = payload(("CAFE",))
+        request.update({
+            "destinationId": "BUSAN_SONGJEONG",
+            "transportMode": "CAR",
+            "startAt": "2026-09-08T13:00:00+09:00",
+            "returnBy": "2026-09-08T21:00:00+09:00",
+        })
+        utc_request = {
+            **request,
+            "startAt": "2026-09-08T04:00:00Z",
+            "returnBy": "2026-09-08T12:00:00Z",
+            "validTimeRange": True,
+        }
+
+        with providers([cafe], hours={"c1": "11:00~18:00"}), patch(
+            "spontaneous.course.search_route",
+            side_effect=car_route,
+        ):
+            korea_status, korea_response = post_json(COURSE_URL, request)
+            utc_status, utc_response = post_json(COURSE_URL, utc_request)
+
+        self.assertEqual(korea_status, 200, korea_response)
+        self.assertEqual(utc_status, 200, utc_response)
+        self.assertEqual(
+            [stop["contentId"] for stop in korea_response["course"]],
+            ["c1"],
+        )
+        self.assertEqual(
+            [stop["contentId"] for stop in utc_response["course"]],
+            ["c1"],
+        )
+        self.assertEqual(
+            datetime.fromisoformat(korea_response["course"][0]["arrivalAt"]),
+            datetime.fromisoformat(utc_response["course"][0]["arrivalAt"]),
+        )
+
+    def test_utc_visit_times_are_checked_in_korea_local_time(self):
+        stop = {
+            "contentId": "c1",
+            "contentTypeId": "39",
+        }
+        with patch(
+            "spontaneous.places.search_food_detail",
+            return_value={"opentimefood": "11:00~18:00"},
+        ):
+            self.assertTrue(is_course_place_open_for_visit(
+                stop,
+                datetime(2026, 9, 8, 4, 48, tzinfo=timezone.utc),
+                datetime(2026, 9, 8, 5, 48, tzinfo=timezone.utc),
+            ))
+            self.assertFalse(is_course_place_open_for_visit(
+                stop,
+                datetime(2026, 9, 8, 1, 48, tzinfo=timezone.utc),
+                datetime(2026, 9, 8, 4, 48, tzinfo=timezone.utc),
+            ))
+            self.assertFalse(is_course_place_open_for_visit(
+                stop,
+                datetime(2026, 9, 8, 4, 48, tzinfo=timezone.utc),
+                datetime(2026, 9, 8, 9, 1, tzinfo=timezone.utc),
+            ))
+
+        self.assertTrue(is_open_now(
+            "11:00~18:00",
+            datetime(2026, 9, 8, 4, 48, tzinfo=timezone.utc),
+        ))
+        self.assertFalse(is_open_now(
+            "11:00~18:00",
+            datetime(2026, 9, 8, 4, 48),
+        ))
 
     def test_coarse_viability_uses_shared_shape_without_details_or_routing(self):
         cafe = place("c1")

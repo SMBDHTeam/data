@@ -5,7 +5,9 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 
 from spontaneous.destinations import DestinationZone
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone
+
+KOREA_TIMEZONE = timezone(timedelta(hours=9))
 
 TOUR_API_BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
 TourApiPlacesCache = dict[str, list[dict]]
@@ -558,6 +560,14 @@ def is_open_now(
 
     start, end = parsed
 
+
+    if (
+        current_time.tzinfo is not None
+        and current_time.utcoffset() is not None
+    ):
+        current_time = current_time.astimezone(
+            KOREA_TIMEZONE
+        )
 
     now = current_time.time()
 

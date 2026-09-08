@@ -349,34 +349,21 @@ def search_food_detail(
             data = json.loads(
                 response.read().decode("utf-8")
             )
-
-    except Exception:
-        return {}
-
-    try:
         items = (
             data["response"]
             ["body"]
             ["items"]
             ["item"]
         )
+        detail = items[0] if items and isinstance(items[0], dict) else {}
+    except Exception:
+        detail = {}
 
-        if not items:
-            return {}
-
-        detail = items[0]
-
-        if (
-            detail_cache is not None
-            and cache_key is not None
-            and detail
-        ):
-            detail_cache[cache_key] = detail
-
-        return detail
-
-    except (KeyError, IndexError, TypeError):
-        return {}
+    # Cache empty/failed lookups too, for this request only. Retrying a course
+    # must not repeatedly fetch the same unavailable detailIntro2 record.
+    if detail_cache is not None and cache_key is not None:
+        detail_cache[cache_key] = detail
+    return detail
 
 
 def enrich_food_themes(
@@ -394,7 +381,7 @@ def enrich_food_themes(
     )
 
     # 음식점만 상세 조회
-    if content_type_id != "39":
+    if content_type_id != "39" or "FOOD" not in themes:
         return themes
 
     content_id = place.get(
@@ -434,6 +421,19 @@ def enrich_food_themes(
     return themes
 
 
+def base_course_place(place: dict) -> dict:
+    """Shared, provider-free record shape for recommendation and planning."""
+    return {
+        "name": place.get("title"),
+        "contentId": place.get("contentid"),
+        "contentTypeId": str(place.get("contenttypeid", "")),
+        "latitude": parse_optional_float(place.get("mapy")),
+        "longitude": parse_optional_float(place.get("mapx")),
+        "themes": infer_place_themes(place),
+        "raw": place,
+    }
+
+
 def convert_to_course_place(
     place: dict,
     detail_cache: TourApiDetailCache | None = None,
@@ -454,37 +454,18 @@ def convert_to_course_place(
             content_type_id=content_type_id,
         )
 
-    themes = infer_place_themes(
-        place
-    )
+    course_place = base_course_place(place)
 
     themes = enrich_food_themes(
         place,
-        themes,
+        course_place["themes"],
         detail_cache=detail_cache,
         detail=food_detail,
     )
 
-    latitude = parse_optional_float(
-        place.get("mapy")
-    )
-    longitude = parse_optional_float(
-        place.get("mapx")
-    )
-
     return {
-        "name": place.get("title"),
-        "contentId": place.get("contentid"),
-        "contentTypeId": str(
-            place.get("contenttypeid", "")
-        ),
-
-        "latitude": latitude,
-        "longitude": longitude,
-
+        **course_place,
         "themes": themes,
-
-        "raw": place,
         "_foodDetail": food_detail,
     }
 

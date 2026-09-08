@@ -12,7 +12,7 @@ from spontaneous.course import (
     group_places_by_role,
     has_required_theme_coverage,
 )
-from spontaneous.places import filter_course_candidates, infer_place_themes
+from spontaneous.places import base_course_place, filter_course_candidates, infer_place_themes
 
 EARTH_RADIUS_METERS = 6_371_000
 DESTINATION_PRERANK_THEME_WEIGHT = 0.8
@@ -97,14 +97,7 @@ def collect_zone_theme_evidence(
 def coarse_course_place(
     place: dict,
 ) -> dict:
-    return {
-        "name": place.get("title"),
-        "contentId": place.get("contentid"),
-        "contentTypeId": str(
-            place.get("contenttypeid", "")
-        ),
-        "themes": infer_place_themes(place),
-    }
+    return base_course_place(place)
 
 
 def has_coarse_course_viability(
@@ -118,9 +111,6 @@ def has_coarse_course_viability(
         theme.upper()
         for theme in desired_themes
     }
-
-    if not desired_set:
-        return True
 
     coarse_places = [
         coarse_course_place(place)
@@ -225,7 +215,7 @@ def select_weighted_destination_candidates(
     selected = [pool.pop(0)]
     chooser = rng if rng is not None else random
     while pool and len(selected) < limit:
-        weights = [max(candidate["score"], 0.01) ** 3 for candidate in pool]
+        weights = [max(candidate["score"], 0.01) ** 2 for candidate in pool]
         index = chooser.choices(range(len(pool)), weights=weights, k=1)[0]
         selected.append(pool.pop(index))
 

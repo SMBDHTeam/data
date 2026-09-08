@@ -1195,6 +1195,12 @@ def search_tmap_transit_route(
             "routing provider=TMAP_TRANSIT status=external_error http=%s",
             exc.code,
         )
+        if exc.code == 429:
+            raise RoutingApiError(
+                provider="TMAP_TRANSIT",
+                detail="TMAP_QUOTA_EXCEEDED",
+                status_code=503,
+            ) from exc
         raise RoutingApiError(
             provider="TMAP_TRANSIT",
             detail="EXTERNAL_ROUTING_API_ERROR",

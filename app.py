@@ -76,12 +76,12 @@ from spontaneous.routing import (
 from spontaneous.places import (
     search_places_by_zone,
     filter_course_candidates,
-    filter_open_places,
     convert_to_course_place,
     is_course_place_open_for_visit,
 )
 
 from spontaneous.course import (
+    CourseTimelineError,
     group_places_by_role,
     build_course_role_plan,
     get_required_roles,
@@ -90,10 +90,9 @@ from spontaneous.course import (
     calculate_sequential_course_timeline,
     has_required_course_roles,
     has_required_theme_coverage,
-    normalize_course_orders,
-    remove_last_optional_stop,
     public_course_stop,
 )
+from spontaneous.planner import CourseCandidateSearch, course_identity, rank_course_candidates
 # -------
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -731,6 +730,12 @@ def recommend_spontaneous_destinations(
         ),
     )
     if not results:
+        if "TMAP_QUOTA_EXCEEDED" in unavailable_reasons:
+            raise HTTPException(
+                status_code=503,
+                detail="TMAP_QUOTA_EXCEEDED",
+            )
+
         if "ODSAY_QUOTA_EXCEEDED" in unavailable_reasons:
             raise HTTPException(
                 status_code=503,
@@ -804,22 +809,50 @@ def create_spontaneous_course(
     )
 
 
-    # 3. 운영시간 필터
-    places = filter_open_places(
-        places,
-        request.startAt,
-        detail_cache=detail_cache,
-    )
-
     after_count = len(places)
+    desired_themes = {
+        theme.upper()
+        for theme in request.desiredThemes
+    }
+    required_roles = get_required_roles(desired_themes)
+    grouped_places = {}
+    course = []
+
+    def reject_course(failure_reason: str, detail: str = "COURSE_NOT_FEASIBLE"):
+        log.info(
+            "spontaneous course rejected. destinationId=%s failureReason=%s "
+            "transportMode=%s desiredThemes=%s startAt=%s returnBy=%s "
+            "placesBeforeFilter=%s placesAfterFilter=%s requiredRoles=%s "
+            "availableRoles=%s courseStopCount=%s",
+            zone.destination_id,
+            failure_reason,
+            request.transportMode.value,
+            sorted(desired_themes),
+            request.startAt.isoformat(),
+            request.returnBy.isoformat(),
+            before_count,
+            after_count,
+            sorted(required_roles),
+            sorted(grouped_places),
+            len(course),
+        )
+        raise HTTPException(status_code=422, detail=detail)
+
+    def course_failure_reason():
+        if not has_required_course_roles(course, required_roles):
+            return "MISSING_REQUIRED_ROLE"
+        if not has_required_theme_coverage(course, desired_themes):
+            return "MISSING_REQUIRED_THEME"
+        if not course:
+            return "COURSE_NOT_FEASIBLE"
+        return None
 
 
     if not places:
-        raise HTTPException(
-            status_code=422,
-            detail="COURSE_NOT_FEASIBLE",
-        )
+        reject_course("NO_PLACES_AFTER_CANDIDATE_FILTER")
 
+    # Opening hours are checked against the routed arrival/departure times below.
+    # A place closed at startAt can still be open when this course visits it.
     course_places = [
         convert_to_course_place(
             place,
@@ -833,15 +866,8 @@ def create_spontaneous_course(
         course_places
     )
 
-    desired_themes = {
-        theme.upper()
-        for theme in request.desiredThemes
-    }
     available_minutes = int(
         (request.returnBy - request.startAt).total_seconds() // 60
-    )
-    required_roles = get_required_roles(
-        desired_themes
     )
     required_themes_by_role = get_required_themes_by_role(
         desired_themes
@@ -851,44 +877,68 @@ def create_spontaneous_course(
         available_minutes,
     )
 
+    ranked_candidates = rank_course_candidates(
+        grouped_places, desired_themes, request.startLocation,
+    )
     course = generate_course(
-        grouped_places,
+        ranked_candidates,
         desired_themes,
         request.startLocation,
         role_plan=role_plan,
         required_themes_by_role=required_themes_by_role,
     )
 
-    if (
-        not course
-        or not has_required_course_roles(
-            course,
-            required_roles,
-        )
-        or not has_required_theme_coverage(
-            course,
-            desired_themes,
-        )
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail="COURSE_NOT_FEASIBLE",
-        )
-
+    search = CourseCandidateSearch(
+        course, ranked_candidates, desired_themes, request.startLocation, role_plan,
+    )
     routing_cache = {}
+    last_failure_reason = "COURSE_NOT_FEASIBLE"
 
-    while course:
-        if not has_required_course_roles(
-            course,
-            required_roles,
-        ) or not has_required_theme_coverage(
-            course,
-            desired_themes,
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="COURSE_NOT_FEASIBLE",
+    def attempt_failed(reason, failed_index=None):
+        nonlocal last_failure_reason
+        last_failure_reason = reason
+        stop = course[failed_index] if failed_index is not None else {}
+        failed_role = stop.get("role")
+        if reason in {"MISSING_REQUIRED_ROLE", "MISSING_REQUIRED_THEME"}:
+            for role, themes in required_themes_by_role.items():
+                role_themes = {theme for item in course if item["role"] == role
+                               for theme in item["themes"]}
+                if not themes.issubset(role_themes):
+                    failed_role = role
+                    break
+        log.info(
+            "spontaneous course attempt failed. destinationId=%s attempt=%s "
+            "selectedContentIds=%s failureReason=%s failedRole=%s "
+            "failedContentId=%s transportMode=%s",
+            zone.destination_id, search.attempts,
+            [item.get("contentId") for item in course], reason,
+            failed_role, stop.get("contentId"), request.transportMode.value,
+        )
+
+    previous_course = []
+    while (candidate := search.next_course()) is not None:
+        course = candidate
+        if search.attempts > 1:
+            previous_keys = set(course_identity(previous_course))
+            current_keys = set(course_identity(course))
+            replacements = [stop for key, stop in zip(course_identity(course), course)
+                            if key not in previous_keys]
+            removed = [stop for key, stop in zip(course_identity(previous_course), previous_course)
+                       if key not in current_keys]
+            changed = (replacements or removed or [{}])[0]
+            log.info(
+                "spontaneous course retry. destinationId=%s attempt=%s "
+                "replacementRole=%s replacementContentId=%s transportMode=%s",
+                zone.destination_id, search.attempts, changed.get("role"),
+                replacements[0].get("contentId") if replacements else None,
+                request.transportMode.value,
             )
+        previous_course = course
+        failure_reason = course_failure_reason()
+        if failure_reason:
+            attempt_failed(failure_reason)
+            search.retry(course, failure_reason)
+            continue
 
         try:
             timeline = calculate_sequential_course_timeline(
@@ -899,15 +949,15 @@ def create_spontaneous_course(
                 cache=routing_cache,
             )
         except RoutingApiError as exc:
+            attempt_failed(exc.detail)
             raise HTTPException(
                 status_code=exc.status_code,
                 detail=exc.detail,
             ) from exc
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=str(exc),
-            ) from exc
+        except CourseTimelineError as exc:
+            attempt_failed(str(exc), exc.stop_index)
+            search.retry(course, str(exc), exc.stop_index)
+            continue
 
         invalid_stop_index = None
 
@@ -931,19 +981,8 @@ def create_spontaneous_course(
                 break
 
         if invalid_stop_index is not None:
-            if course[invalid_stop_index].get(
-                "_required",
-                False,
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail="COURSE_NOT_FEASIBLE",
-                )
-
-            course = normalize_course_orders(
-                course[:invalid_stop_index]
-                + course[invalid_stop_index + 1:]
-            )
+            attempt_failed("PLACE_CLOSED_AT_VISIT_TIME", invalid_stop_index)
+            search.retry(course, last_failure_reason, invalid_stop_index)
             continue
 
         estimated_return_at = timeline[
@@ -975,20 +1014,15 @@ def create_spontaneous_course(
                 ],
             }
 
-        trimmed_course = remove_last_optional_stop(
-            course
-        )
+        attempt_failed("RETURN_TIME_EXCEEDED")
+        search.retry(course, last_failure_reason)
 
-        if trimmed_course is None:
-            raise HTTPException(
-                status_code=422,
-                detail="COURSE_NOT_FEASIBLE",
-            )
-
-        course = trimmed_course
-
-    raise HTTPException(
-        status_code=422,
-        detail="COURSE_NOT_FEASIBLE",
+    log.info(
+        "spontaneous course search finished. destinationId=%s "
+        "failureReason=COURSE_NOT_FEASIBLE attempts=%s lastFailureReason=%s "
+        "searchLimitReached=%s transportMode=%s",
+        zone.destination_id, search.attempts, last_failure_reason,
+        bool(search.pending), request.transportMode.value,
     )
+    reject_course(last_failure_reason)
 # -------

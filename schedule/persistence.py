@@ -53,6 +53,30 @@ CONTENT_TYPE_FALLBACK_LABELS = {
     "39": "음식점",
 }
 
+STYLE_SUMMARY_LABELS = {
+    "COMPANION_SOLO": "혼자",
+    "COMPANION_FRIENDS": "친구와",
+    "COMPANION_COUPLE": "연인과",
+    "COMPANION_FAMILY_WITH_CHILD": "아이와 가족",
+    "COMPANION_PARENTS": "부모님과",
+    "COMPANION_OTHER": "함께",
+    "MOBILITY_NORMAL": "도보 보통",
+    "MOBILITY_LOW_WALK": "걷기 적게",
+    "MOBILITY_AVOID_HILLS_STAIRS": "완만한 동선",
+    "TRANSIT_SIMPLE": "환승 적게",
+    "TRANSIT_FAST": "빠른 이동",
+    "PACE_PACKED": "알찬 일정",
+    "PACE_RELAXED": "여유 일정",
+    "THEME_FOOD": "맛집",
+    "THEME_NATURE": "자연",
+    "THEME_CULTURE": "문화·역사",
+    "THEME_HISTORY_CULTURE": "문화·역사",
+    "THEME_ACTIVITY": "액티비티",
+    "THEME_SHOPPING": "쇼핑",
+    "THEME_HEALING": "힐링",
+    "THEME_SEA": "바다",
+}
+
 
 def resolve_db_dsn() -> tuple[str | None, str | None, str | None]:
     jdbc_url = os.getenv("SPRING_DATASOURCE_URL")
@@ -84,6 +108,40 @@ def normalize_category_label(raw_label: str | None, content_type_id: str | None)
     if normalized.startswith("A") and normalized[1:].isdigit():
         return fallback
     return normalized
+
+
+def normalize_style_summary(raw_summary: str | None) -> str:
+    summary = (raw_summary or "").strip()
+    if not summary:
+        return "추천 일정"
+
+    answer_ids = [token.strip() for token in summary.split(" / ") if token.strip()]
+    if not answer_ids or not all(answer_id in STYLE_SUMMARY_LABELS for answer_id in answer_ids):
+        return summary
+
+    labeled_answers = [(answer_id, STYLE_SUMMARY_LABELS[answer_id]) for answer_id in answer_ids]
+    themes = [label for answer_id, label in labeled_answers if answer_id.startswith("THEME_")]
+    paces = [label for answer_id, label in labeled_answers if answer_id.startswith("PACE_")]
+    companions = [label for answer_id, label in labeled_answers if answer_id.startswith("COMPANION_")]
+    mobility_or_transit = [
+        label
+        for answer_id, label in labeled_answers
+        if answer_id.startswith(("MOBILITY_", "TRANSIT_"))
+    ]
+
+    parts = []
+    if companions:
+        parts.append(companions[0])
+    if themes:
+        parts.append("·".join(themes[:2]))
+    if paces:
+        parts.append(paces[0])
+    if not parts:
+        parts.extend(label for _, label in labeled_answers[:3])
+    if mobility_or_transit and len(parts) < 3:
+        parts.append(mobility_or_transit[0])
+
+    return " ".join(parts[:3]) or "추천 일정"
 
 
 def normalize_transit_provider(provider: str | None) -> str | None:
@@ -703,7 +761,7 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
                 endDate=row["end_date"],
                 dailyStartTime=row["daily_start_time"],
                 dailyEndTime=row["daily_end_time"],
-                styleSummary=row["style_summary"] or "",
+                styleSummary=normalize_style_summary(row["style_summary"]),
                 days=days_by_schedule.get(row["id"], []),
                 evaluation=None,
                 previewId=row["preview_id"],

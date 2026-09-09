@@ -1224,7 +1224,7 @@ def build_inbound_transit(origin_name: str | None, destination_name: str, transi
     if origin_name is None:
         return None
     return ScheduleTransit(
-        routeType="PLACEHOLDER",
+        routeType="WALK",
         routeOrder=0,
         originName=origin_name,
         destinationName=destination_name,
@@ -1474,7 +1474,7 @@ def route_lines_for_transit(
                 dayNo=day_no,
                 routeOrder=route_order,
                 lineOrder=1,
-                mode="PLACEHOLDER",
+                mode="WALK",
                 lineName="이동 경로 안내",
                 startName=start_name,
                 endName=end_name,
@@ -1493,6 +1493,7 @@ def route_lines_for_transit(
             payload["dayNo"] = day_no
             payload["routeOrder"] = route_order
             payload["lineOrder"] = index
+            payload["mode"] = public_route_mode(payload.get("mode"))
             output.append(RouteLine.model_validate(payload))
         return output
     if transit.segments:
@@ -1510,7 +1511,7 @@ def route_lines_for_transit(
                     dayNo=day_no,
                     routeOrder=route_order,
                     lineOrder=index,
-                    mode=segment.mode,
+                    mode=public_route_mode(segment.mode),
                     lineName=segment.line_name,
                     startName=segment.start_station_name or start_name,
                     endName=segment.end_station_name or end_name,
@@ -1527,7 +1528,7 @@ def route_lines_for_transit(
             dayNo=day_no,
             routeOrder=route_order,
             lineOrder=1,
-            mode=transit.route_type or "PLACEHOLDER",
+            mode=public_route_mode(transit.route_type),
             lineName=transit.summary,
             startName=start_name,
             endName=end_name,
@@ -1538,6 +1539,13 @@ def route_lines_for_transit(
             coordinates=build_coordinates(start_lon, start_lat, end_lon, end_lat),
         )
     ]
+
+
+def public_route_mode(mode: str | None) -> str:
+    normalized = (mode or "").strip().upper()
+    if normalized in {"", "PLACEHOLDER"}:
+        return "WALK"
+    return normalized
 
 
 def resolve_route_coverage(days: list[ScheduleDay]) -> str:

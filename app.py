@@ -64,6 +64,7 @@ from spontaneous.service import (
     calculate_destination_score,
     calculate_final_destination_score,
     calculate_zone_theme_score,
+    calculate_zone_time_bonus,
     has_coarse_course_viability,
     select_weighted_destination_candidates,
 )
@@ -84,6 +85,7 @@ from spontaneous.course import (
     CourseTimelineError,
     group_places_by_role,
     build_course_role_plan,
+    course_stop_range,
     get_required_roles,
     get_required_themes_by_role,
     generate_course,
@@ -93,6 +95,8 @@ from spontaneous.course import (
     public_course_stop,
 )
 from spontaneous.planner import CourseCandidateSearch, course_identity, rank_course_candidates
+from spontaneous.time_profile import DESTINATION_FINAL_TIME_SCALE, resolve_time_profile
+from spontaneous.time_window import SpontaneousTimeWindowError, validate_spontaneous_time_window
 # -------
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -584,16 +588,33 @@ def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> Sc
     return get_schedule_map(schedule_id, dayNo)
 
 
+def validate_spontaneous_request_time(
+    request: SpontaneousDestinationRequest | SpontaneousCourseRequest,
+) -> None:
+    try:
+        validate_spontaneous_time_window(request.startAt, request.returnBy)
+    except SpontaneousTimeWindowError as exc:
+        log.info("spontaneous time window rejected. failureReason=%s", exc.failure_reason)
+        # Spring explicitly maps this existing detail to a client input error.
+        raise HTTPException(
+            status_code=422,
+            detail="INVALID_TIME_RANGE",
+        ) from exc
+
+
 @app.post("/api/v1/spontaneous-trips/destinations", response_model=SpontaneousDestinationResponse)
 def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
 ) -> SpontaneousDestinationResponse:
-    if request.returnBy <= request.startAt:
-        raise HTTPException(
-            status_code=422,
-            detail="INVALID_TIME_RANGE",
-        )
+    validate_spontaneous_request_time(request)
 
+    time_profile = resolve_time_profile(request.startAt)
+    log.info(
+        "spontaneous destinations. startAt=%s resolvedTimeProfile=%s "
+        "transportMode=%s desiredThemes=%s",
+        request.startAt.isoformat(), time_profile.value if time_profile else None,
+        request.transportMode.value, sorted(theme.value for theme in request.desiredThemes),
+    )
     candidates = []
     routing_cache = {}
     places_cache = {}
@@ -642,18 +663,25 @@ def recommend_spontaneous_destinations(
             request.startLocation,
             theme_score,
         )
+        time_bonus = calculate_zone_time_bonus(
+            places, request.desiredThemes, time_profile, request.transportMode,
+        )
 
         candidates.append(
             {
                 "zone": zone,
                 "themeScore": round(theme_score, 4),
                 "distanceMeters": round(distance),
-                "score": round(final_score, 4),
+                "score": round(final_score + time_bonus, 4),
+                "_timeBonus": time_bonus,
             }
         )
 
+    # Explicit user evidence takes precedence; time only reorders within that
+    # strength. Keep themeScore itself and the weighted diversity draw unchanged.
     candidates.sort(
         key=lambda item: (
+            -item["themeScore"] if request.desiredThemes and time_profile else 0,
             -item["score"],
             -item["themeScore"],
             item["distanceMeters"],
@@ -703,6 +731,7 @@ def recommend_spontaneous_destinations(
             transport.outboundMinutes,
             transport.availableStayMinutes,
         )
+        final_score += candidate["_timeBonus"] * DESTINATION_FINAL_TIME_SCALE
 
         results.append(
             {
@@ -722,6 +751,7 @@ def recommend_spontaneous_destinations(
 
     results.sort(
         key=lambda item: (
+            -item["themeScore"] if request.desiredThemes and time_profile else 0,
             -item["score"],
             -item["themeScore"],
             item["transport"]["outboundMinutes"],
@@ -766,12 +796,8 @@ def create_spontaneous_course(
     request: SpontaneousCourseRequest,
 ) -> SpontaneousCourseResponse:
     started_at = monotonic()
-
-    if request.returnBy <= request.startAt:
-        raise HTTPException(
-            status_code=422,
-            detail="INVALID_TIME_RANGE",
-        )
+    validate_spontaneous_request_time(request)
+    time_profile = resolve_time_profile(request.startAt)
 
     zone = find_destination_zone(
         request.destinationId
@@ -845,6 +871,8 @@ def create_spontaneous_course(
             return "MISSING_REQUIRED_THEME"
         if not course:
             return "COURSE_NOT_FEASIBLE"
+        if len(course) > max_stops:
+            return "STOP_LIMIT_EXCEEDED"
         return None
 
 
@@ -869,16 +897,20 @@ def create_spontaneous_course(
     available_minutes = int(
         (request.returnBy - request.startAt).total_seconds() // 60
     )
+    _, max_stops = course_stop_range(available_minutes)
     required_themes_by_role = get_required_themes_by_role(
         desired_themes
     )
     role_plan = build_course_role_plan(
         desired_themes,
         available_minutes,
+        start_at=request.startAt, transport_mode=request.transportMode,
+        available_roles=set(grouped_places),
     )
 
     ranked_candidates = rank_course_candidates(
         grouped_places, desired_themes, request.startLocation,
+        start_at=request.startAt, transport_mode=request.transportMode, role_plan=role_plan,
     )
     course = generate_course(
         ranked_candidates,
@@ -886,10 +918,12 @@ def create_spontaneous_course(
         request.startLocation,
         role_plan=role_plan,
         required_themes_by_role=required_themes_by_role,
+        start_at=request.startAt, transport_mode=request.transportMode, max_stops=max_stops,
     )
 
     search = CourseCandidateSearch(
         course, ranked_candidates, desired_themes, request.startLocation, role_plan,
+        start_at=request.startAt, transport_mode=request.transportMode, max_stops=max_stops,
     )
     routing_cache = {}
     last_failure_reason = "COURSE_NOT_FEASIBLE"
@@ -982,7 +1016,7 @@ def create_spontaneous_course(
 
         if invalid_stop_index is not None:
             attempt_failed("PLACE_CLOSED_AT_VISIT_TIME", invalid_stop_index)
-            search.retry(course, last_failure_reason, invalid_stop_index)
+            search.retry(course, last_failure_reason, invalid_stop_index, timeline=timeline["course"])
             continue
 
         estimated_return_at = timeline[
@@ -991,12 +1025,14 @@ def create_spontaneous_course(
 
         if estimated_return_at <= request.returnBy:
             log.info(
-                "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, returnMinutes=%s, elapsedMs=%d",
+                "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, "
+                "returnMinutes=%s, elapsedMs=%d, startAt=%s, timeProfile=%s",
                 request.destinationId,
                 request.transportMode,
                 len(timeline["course"]),
                 timeline["returnTravelMinutes"],
                 int((monotonic() - started_at) * 1000),
+                request.startAt.isoformat(), time_profile.value if time_profile else None,
             )
 
             return {
@@ -1015,7 +1051,7 @@ def create_spontaneous_course(
             }
 
         attempt_failed("RETURN_TIME_EXCEEDED")
-        search.retry(course, last_failure_reason)
+        search.retry(course, last_failure_reason, timeline=timeline["course"])
 
     log.info(
         "spontaneous course search finished. destinationId=%s "

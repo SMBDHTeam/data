@@ -4,7 +4,7 @@ import random
 from math import asin, cos, radians, sin, sqrt
 
 from spontaneous.destinations import DESTINATION_ZONES, DestinationZone
-from spontaneous.models import Coordinate
+from spontaneous.models import Coordinate, TransportMode
 from spontaneous.course import (
     can_cover_required_themes_for_role,
     get_required_roles,
@@ -13,6 +13,7 @@ from spontaneous.course import (
     has_required_theme_coverage,
 )
 from spontaneous.places import base_course_place, filter_course_candidates, infer_place_themes
+from spontaneous.time_profile import calculate_time_fit_bonus, TimeProfile
 
 EARTH_RADIUS_METERS = 6_371_000
 DESTINATION_PRERANK_THEME_WEIGHT = 0.8
@@ -183,6 +184,20 @@ def calculate_zone_theme_score(
         strengths.append(coverage_ratio * 0.7 + volume_score * 0.3)
 
     return max(0.0, min(1.0, sum(strengths) / len(strengths)))
+
+
+def calculate_zone_time_bonus(
+    places: list[dict],
+    desired_themes: list[str],
+    profile: TimeProfile | None,
+    transport_mode: TransportMode,
+) -> float:
+    candidates = filter_course_candidates(places)
+    if not candidates:
+        return 0.0
+    return sum(calculate_time_fit_bonus(
+        infer_place_themes(place), desired_themes, profile, transport_mode,
+    ) for place in candidates) / len(candidates)
 
 
 def select_weighted_destination_candidates(

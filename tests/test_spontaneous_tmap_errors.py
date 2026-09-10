@@ -17,6 +17,11 @@ def http_error(status):
 
 
 class TmapTransitErrorTest(TestCase):
+    def setUp(self):
+        clock_patch = patch("spontaneous.time_window.current_kst_time", return_value=START_AT)
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+
     def test_http_429_is_distinguished_from_other_provider_errors_without_retry(self):
         for status in (429, 400, 401, 403, 500, 502, 503):
             with (

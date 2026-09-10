@@ -178,6 +178,34 @@ SKT_API_KEY=...
 
 현재 [deploy-dev.yml](/Users/miju/test_1/data/.github/workflows/deploy-dev.yml) 은 위 값을 `.env.dev` 로 만든 뒤 EC2의 `data-ai` 컨테이너를 `--env-file /opt/hackathon-dev/.env.dev` 로 실행합니다.
 
+## 즉흥여행 시간 입력 정책
+
+`POST /api/v1/spontaneous-trips/destinations`와 `POST /api/v1/spontaneous-trips/course`는
+같은 시간 검증 함수를 사용한다. 기존 요청·응답 필드는 바꾸지 않는다.
+
+- `startAt`과 `returnBy`는 `+09:00`, `Z` 등 timezone offset이 있는 datetime이어야 한다.
+- 요청 시점의 서버 시각을 한 번 읽고, 모든 날짜·시간 비교는 `ZoneInfo("Asia/Seoul")`로 변환해서 수행한다.
+- `startAt`의 KST 날짜는 서버 요청 시점의 KST 오늘과 같아야 한다. 00:00~08:59 자체는 금지하지 않는다.
+- `startAt >= now - 5분`을 허용한다. 정확히 5분 전은 허용하지만, 자정 직후라도 전날 출발은 허용하지 않는다.
+- `returnBy > startAt`이어야 하며, 상한은 **출발일의 다음날 03:00:00 KST**다. 03:00:00 초과는 거부한다.
+- `now`는 유효성 검증에만 사용한다. 추천 프로필은 사용자가 보낸 `startAt`, 코스 방문 프로필은 예상/실제 방문시간을 사용한다.
+  예를 들어 now=15:00, startAt=19:00이면 NIGHT이고, 다음날 00:30 방문은 LATE_NIGHT다.
+- 검증은 각 요청에서 다시 수행한다. 목적지 조회 후 시간이 지나 허용 오차나 KST 날짜 경계를 넘으면 동일한 출발시간도 더 이상 유효하지 않을 수 있다.
+
+시간 정책 위반은 기존 `HTTP 422 {"detail":"INVALID_TIME_RANGE"}`로 반환한다.
+내부 로그의 `failureReason`은 `SPONTANEOUS_TIMEZONE_REQUIRED`,
+`SPONTANEOUS_START_DATE_NOT_TODAY`, `SPONTANEOUS_START_TIME_IN_PAST`,
+`SPONTANEOUS_RETURN_TIME_TOO_LATE`, `INVALID_TIME_RANGE`로 구분한다.
+확인한 Spring `FastApiSpontaneousClient`는 `INVALID_TIME_RANGE`를
+공개 API의 `400 INVALID_SPONTANEOUS_TRIP_REQUEST`로 매핑하므로 새 detail은 노출하지 않는다.
+
+**호환성 변경:** DATA의 기존 Pydantic `datetime` 필드는 naive 입력도 파싱했지만,
+이제 두 엔드포인트에서 이를 명시적으로 거부한다. DATA 직접 호출자는 offset을 포함해야 한다.
+Spring 요청 DTO는 이미 `OffsetDateTime`을 사용한다. API 필드 구조는 유지하며 SERVER 코드는 수정하지 않는다.
+
+테스트는 `validate_spontaneous_time_window(..., now=fixed_now)` 또는
+`spontaneous.time_window.current_kst_time`의 고정 시각으로 실제 현재시간 의존성을 제거한다.
+
 ## 즉흥 여행 실패 코드
 
 ### 목적지 추천

@@ -74,6 +74,9 @@ def successful_transport(mode: TransportMode) -> TransportOption:
 
 class SpontaneousDestinationRoutingLimitTest(TestCase):
     def setUp(self):
+        clock_patch = patch("spontaneous.time_window.current_kst_time", return_value=START_AT)
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
         self.rng_patch = patch("spontaneous.service.random", Random(1))
         self.rng_patch.start()
         self.addCleanup(self.rng_patch.stop)

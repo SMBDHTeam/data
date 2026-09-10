@@ -80,7 +80,7 @@ def post_json(path, body):
 
 
 @contextmanager
-def providers(places, hours=None, routing=None):
+def providers(places, hours=None, routing=None, now=START_AT):
     hours = hours or {}
     by_coordinate = {
         (round(float(item["mapy"]), 6), round(float(item["mapx"]), 6)): item["contentid"]
@@ -109,6 +109,7 @@ def providers(places, hours=None, routing=None):
         return BytesIO(json.dumps({"response": {"body": {"items": {"item": [item]}}}}).encode())
 
     with (
+        patch("spontaneous.time_window.current_kst_time", return_value=now),
         patch.dict("os.environ", {"TOUR_API_KEY": "test-key", "SKT_API_KEY": "test-key"}),
         patch("app.search_places_by_zone", side_effect=lambda zone, places_cache=None: places),
         patch("spontaneous.places.urlopen", side_effect=detail),
@@ -392,7 +393,7 @@ class SpontaneousCourseFallbackTest(TestCase):
             "validTimeRange": True,
         }
 
-        with providers([cafe], hours={"c1": "11:00~18:00"}), patch(
+        with providers([cafe], hours={"c1": "11:00~18:00"}, now=START_AT.replace(day=8)), patch(
             "spontaneous.course.search_route",
             side_effect=car_route,
         ):

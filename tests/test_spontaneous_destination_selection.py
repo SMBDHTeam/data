@@ -183,6 +183,7 @@ class TourApiDestinationRecommendationTest(TestCase):
             return TOURAPI_PLACES_BY_ZONE[zone.destination_id]
 
         with (
+            patch("spontaneous.time_window.current_kst_time", return_value=payload.startAt),
             patch("app.search_places_by_zone", side_effect=replay_places),
             patch("spontaneous.service.random", Random(seed)),
             patch(

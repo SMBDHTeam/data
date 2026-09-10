@@ -48,6 +48,7 @@ def provider_boundaries(places=None, opening_hours="11:00~18:00", provider=route
     # generation, sequential timing, opening-hours parsing and cache run normally.
     detail = {"response": {"body": {"items": {"item": [{"opentimefood": opening_hours}]}}}}
     with (
+        patch("spontaneous.time_window.current_kst_time", return_value=START_AT),
         patch.dict("os.environ", {"TOUR_API_KEY": "test-key"}),
         patch("app.search_places_by_zone", return_value=[CAFE] if places is None else places),
         patch("spontaneous.places.urlopen", side_effect=lambda *args, **kwargs:

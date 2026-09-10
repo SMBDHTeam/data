@@ -4,6 +4,7 @@ from math import asin, cos, radians, sin, sqrt
 
 from spontaneous.models import Coordinate, TransportMode
 from spontaneous.places import SEAFOOD_MENU_KEYWORDS
+from spontaneous.time_profile import calculate_time_fit_bonus, resolve_time_profile
 from spontaneous.routing import (
     RouteResultCache,
     search_route,
@@ -68,6 +69,40 @@ ACTIVITY_ROLE_THEMES = {
     "SHOPPING",
 }
 MIN_OPTIONAL_ROLE_BUFFER_MINUTES = 30
+# Soft target ranges; availability, requested coverage and returnBy take priority
+# over the lower bound. The upper bound applies to every successful course.
+COURSE_STOP_POLICY = ((120, 1, 2), (240, 2, 3), (360, 3, 4), (None, 4, 5))
+# Straight-line estimates are used ONLY for ranking, never as route results or
+# feasibility evidence. The provider timeline remains authoritative.
+RANKING_SPEED_KMH = {TransportMode.WALK: 4, TransportMode.PUBLIC_TRANSIT: 18, TransportMode.CAR: 30}
+
+
+def course_stop_range(available_minutes: int) -> tuple[int, int]:
+    return next((minimum, maximum) for upper, minimum, maximum in COURSE_STOP_POLICY
+                if upper is None or available_minutes < upper)
+
+
+def limit_optional_course_stops(course: list[dict], maximum: int | None) -> list[dict]:
+    """Preserve all requested coverage; excess required stops need planner repair."""
+    while maximum is not None and len(course) > maximum:
+        reduced = remove_last_optional_stop(course)
+        if reduced is None:
+            break
+        course = reduced
+    return course
+
+
+def estimate_visit_at(
+    place: dict,
+    current_location,
+    departure_at: datetime | None,
+    transport_mode: TransportMode | None,
+) -> datetime | None:
+    if departure_at is None or transport_mode is None:
+        return departure_at
+    distance = calculate_place_distance_for_ranking(place, current_location)
+    minutes = distance / 1000 / RANKING_SPEED_KMH[transport_mode] * 60
+    return departure_at + timedelta(minutes=minutes)
 
 
 def calculate_distance_meters(
@@ -432,6 +467,8 @@ def select_best_place(
     current_location,
     required_themes: set[str] | None = None,
     selected_place_keys: set[tuple] | None = None,
+    departure_at: datetime | None = None,
+    transport_mode: TransportMode | None = None,
 ) -> dict | None:
     """
     역할별 후보 중
@@ -482,6 +519,8 @@ def select_best_place(
             desired_themes,
             role,
             current_location,
+            departure_at=departure_at,
+            transport_mode=transport_mode,
         ),
     )[0]
 
@@ -558,6 +597,9 @@ def place_ranking_key(
     role: str,
     current_location,
     remaining_themes: set[str] | None = None,
+    departure_at: datetime | None = None,
+    transport_mode: TransportMode | None = None,
+    visit_at: datetime | None = None,
 ) -> tuple:
     place_themes = get_place_themes(
         place
@@ -582,8 +624,17 @@ def place_ranking_key(
         current_location,
     )
 
+    profile = resolve_time_profile(visit_at if visit_at is not None else estimate_visit_at(
+        place, current_location, departure_at, transport_mode,
+    ))
+    context_key = () if profile is None else (
+        -calculate_theme_score(place, desired_themes),
+        -calculate_menu_relevance_score(place, desired_themes, role),
+        -calculate_time_fit_bonus(place_themes, desired_themes, profile, transport_mode),
+    )
     return (
         -covered_count,
+        *context_key,
         -place_score,
         distance,
         str(
@@ -606,6 +657,8 @@ def select_best_covering_place(
     current_location,
     remaining_themes: set[str],
     selected_place_keys: set[tuple],
+    departure_at: datetime | None = None,
+    transport_mode: TransportMode | None = None,
 ) -> dict | None:
     candidates = [
         place
@@ -627,6 +680,8 @@ def select_best_covering_place(
             role,
             current_location,
             remaining_themes=remaining_themes,
+            departure_at=departure_at,
+            transport_mode=transport_mode,
         ),
     )[0]
 
@@ -684,6 +739,9 @@ def get_required_themes_by_role(
 def build_course_role_plan(
     desired_themes: set[str],
     available_minutes: int | None = None,
+    start_at: datetime | None = None,
+    transport_mode: TransportMode | None = None,
+    available_roles: set[str] | None = None,
 ) -> list[tuple[str, int]]:
     required_roles = get_required_roles(
         desired_themes
@@ -691,6 +749,7 @@ def build_course_role_plan(
     plan: list[tuple[str, int]] = []
     planned_roles: set[str] = set()
     remaining_minutes = available_minutes
+    maximum = course_stop_range(available_minutes)[1] if available_minutes is not None else None
 
     def append_role(
         role: str,
@@ -699,6 +758,10 @@ def build_course_role_plan(
         nonlocal remaining_minutes
 
         if role in planned_roles:
+            return
+        if not required and available_roles is not None and role not in available_roles:
+            return
+        if not required and maximum is not None and len(plan) >= maximum:
             return
 
         stay_minutes = ROLE_STAY_MINUTES[role]
@@ -722,7 +785,8 @@ def build_course_role_plan(
         if remaining_minutes is not None:
             remaining_minutes -= stay_minutes
 
-    if not required_roles:
+    profile = resolve_time_profile(start_at)
+    if not required_roles and profile is None:
         for role in DEFAULT_COURSE_ROLE_ORDER:
             append_role(
                 role,
@@ -736,12 +800,23 @@ def build_course_role_plan(
                     required=True,
                 )
 
-    for role in OPTIONAL_ROLE_ORDER:
+    optional_roles = list(OPTIONAL_ROLE_ORDER)
+    if profile is not None or (available_minutes is not None and available_minutes >= 360):
+        optional_roles.append("NIGHT_VIEW")
+    role_themes = {"ACTIVITY": ACTIVITY_ROLE_THEMES, "MEAL": {"FOOD"},
+                   "CAFE": {"CAFE"}, "NIGHT_VIEW": {"NIGHT_VIEW"}}
+    while optional_roles:
+        if profile is not None:
+            elapsed = sum(stay for _, stay in plan)
+            visit_profile = resolve_time_profile(start_at + timedelta(minutes=elapsed))
+            # The strongest applicable theme represents an optional role; actual
+            # places are ranked separately using their own inferred themes.
+            optional_roles.sort(key=lambda role: -max(calculate_time_fit_bonus(
+                {theme}, desired_themes, visit_profile, transport_mode,
+            ) for theme in role_themes[role]))
+        role = optional_roles.pop(0)
         if role not in required_roles:
-            append_role(
-                role,
-                required=False,
-            )
+            append_role(role, required=False)
 
     return plan
 
@@ -926,6 +1001,9 @@ def generate_course(
     current_location,
     role_plan: list[tuple[str, int]] | None = None,
     required_themes_by_role: dict[str, set[str]] | None = None,
+    start_at: datetime | None = None,
+    transport_mode: TransportMode | None = None,
+    max_stops: int | None = None,
 ) -> list[dict]:
     """
     코스 생성
@@ -934,6 +1012,7 @@ def generate_course(
     """
 
     course = []
+    cursor_time = start_at
     order = 1
     selected_place_keys: set[tuple] = set()
     required_themes_by_role = (
@@ -1000,6 +1079,8 @@ def generate_course(
                     cursor_location,
                     remaining_themes,
                     selected_place_keys,
+                    departure_at=cursor_time,
+                    transport_mode=transport_mode,
                 )
 
                 if not selected:
@@ -1026,6 +1107,10 @@ def generate_course(
                 selected_place_keys.add(
                     get_place_identity(selected)
                 )
+                if cursor_time is not None:
+                    cursor_time = estimate_visit_at(
+                        selected, cursor_location, cursor_time, transport_mode,
+                    ) + timedelta(minutes=stay_minutes)
                 cursor_location = {
                     "latitude": selected.get("latitude"),
                     "longitude": selected.get("longitude"),
@@ -1042,6 +1127,8 @@ def generate_course(
             role,
             cursor_location,
             selected_place_keys=selected_place_keys,
+            departure_at=cursor_time,
+            transport_mode=transport_mode,
         )
 
         if not selected:
@@ -1062,6 +1149,10 @@ def generate_course(
         selected_place_keys.add(
             get_place_identity(selected)
         )
+        if cursor_time is not None:
+            cursor_time = estimate_visit_at(
+                selected, cursor_location, cursor_time, transport_mode,
+            ) + timedelta(minutes=stay_minutes)
         cursor_location = {
             "latitude": selected.get("latitude"),
             "longitude": selected.get("longitude"),
@@ -1069,7 +1160,7 @@ def generate_course(
         order += 1
 
 
-    return course
+    return limit_optional_course_stops(course, max_stops)
 
 
 def remove_last_optional_stop(

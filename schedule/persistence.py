@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 import psycopg
@@ -312,12 +312,16 @@ def save_schedule(
                     id, status, start_date, end_date, daily_start_time, daily_end_time,
                     start_place_name, start_longitude, start_latitude, end_place_name, end_longitude, end_latitude,
                     preview_id, time_zone, lodging_mode, route_coverage, planning_warnings_json,
-                    style_summary, condition_json, user_id, created_at, updated_at
+                    style_summary, condition_json, user_id, schedule_type, transport_mode,
+                    start_at, return_by, estimated_return_at, spontaneous_metadata_json,
+                    created_at, updated_at
                 ) VALUES (
                     %(id)s, %(status)s, %(start_date)s, %(end_date)s, %(daily_start_time)s, %(daily_end_time)s,
                     %(start_place_name)s, %(start_longitude)s, %(start_latitude)s, %(end_place_name)s, %(end_longitude)s, %(end_latitude)s,
                     %(preview_id)s, %(time_zone)s, %(lodging_mode)s, %(route_coverage)s, %(planning_warnings_json)s,
-                    %(style_summary)s, %(condition_json)s, %(user_id)s, COALESCE((SELECT created_at FROM schedules WHERE id = %(id)s), %(now)s), %(now)s
+                    %(style_summary)s, %(condition_json)s, %(user_id)s, %(schedule_type)s, %(transport_mode)s,
+                    %(start_at)s, %(return_by)s, %(estimated_return_at)s, %(spontaneous_metadata_json)s,
+                    COALESCE((SELECT created_at FROM schedules WHERE id = %(id)s), %(now)s), %(now)s
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     status = EXCLUDED.status,
@@ -338,6 +342,12 @@ def save_schedule(
                     planning_warnings_json = EXCLUDED.planning_warnings_json,
                     style_summary = EXCLUDED.style_summary,
                     condition_json = EXCLUDED.condition_json,
+                    schedule_type = EXCLUDED.schedule_type,
+                    transport_mode = EXCLUDED.transport_mode,
+                    start_at = EXCLUDED.start_at,
+                    return_by = EXCLUDED.return_by,
+                    estimated_return_at = EXCLUDED.estimated_return_at,
+                    spontaneous_metadata_json = EXCLUDED.spontaneous_metadata_json,
                     -- 이미 주인이 있으면 유지한다. 수정 요청은 소유자를 싣지 않아
                     -- 그대로 덮으면 첫 수정에서 NULL 이 된다.
                     user_id = COALESCE(schedules.user_id, EXCLUDED.user_id),
@@ -367,12 +377,240 @@ def save_schedule(
                     ),
                     "style_summary": schedule.style_summary,
                     "condition_json": json_dumps_model(condition_request),
+                    "schedule_type": schedule.schedule_type,
+                    "transport_mode": schedule.transport_mode,
+                    "start_at": as_offset(schedule.start_at),
+                    "return_by": as_offset(schedule.return_by),
+                    "estimated_return_at": as_offset(schedule.estimated_return_at),
+                    "spontaneous_metadata_json": json.dumps(
+                        schedule.spontaneous_metadata, ensure_ascii=False
+                    ) if schedule.spontaneous_metadata is not None else None,
                     "now": datetime.now(),
                 },
             )
             for day in schedule.days:
                 save_day(cur, schedule.id, day)
         conn.commit()
+
+
+def save_spontaneous_schedule(
+    schedule: ScheduleResponse,
+    place_snapshots: list[dict[str, Any]],
+    owner_id: int,
+    idempotency_key: str,
+    request_hash: str,
+    spontaneous_preview_id: UUID,
+) -> UUID:
+    """Atomically claim the request, resolve places, and commit the schedule."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            now = datetime.now(timezone.utc)
+            cur.execute(
+                """
+                INSERT INTO schedule_creation_requests (
+                    id, idempotency_key, preview_id, request_hash, status, schedule_id,
+                    response_status, response_json, last_error_code, created_at, completed_at,
+                    expires_at, user_id, request_type, spontaneous_preview_id
+                ) VALUES (
+                    %(id)s, %(idempotency_key)s, NULL, %(request_hash)s, 'IN_PROGRESS', NULL,
+                    NULL, NULL, NULL, %(now)s, NULL, %(expires_at)s,
+                    %(user_id)s, 'SPONTANEOUS', %(spontaneous_preview_id)s
+                )
+                ON CONFLICT DO NOTHING
+                """,
+                {
+                    "id": uuid4(),
+                    "idempotency_key": idempotency_key,
+                    "request_hash": request_hash,
+                    "now": now,
+                    "expires_at": now.replace(microsecond=0) + timedelta(days=1),
+                    "user_id": owner_id,
+                    "spontaneous_preview_id": spontaneous_preview_id,
+                },
+            )
+            inserted = cur.rowcount == 1
+            cur.execute(
+                """
+                SELECT id, request_hash, status, schedule_id
+                FROM schedule_creation_requests
+                WHERE user_id = %s AND idempotency_key = %s
+                FOR UPDATE
+                """,
+                (owner_id, idempotency_key),
+            )
+            request_row = cur.fetchone()
+            if request_row is None:
+                cur.execute(
+                    """
+                    SELECT schedule_id
+                    FROM schedule_creation_requests
+                    WHERE user_id = %s AND spontaneous_preview_id = %s
+                    """,
+                    (owner_id, spontaneous_preview_id),
+                )
+                duplicate_preview = cur.fetchone()
+                if duplicate_preview is not None:
+                    raise HTTPException(status_code=409, detail="SPONTANEOUS_PREVIEW_ALREADY_SAVED")
+                raise RuntimeError("Failed to claim spontaneous schedule request")
+            if request_row["request_hash"] != request_hash:
+                raise HTTPException(status_code=409, detail="IDEMPOTENCY_KEY_REUSED")
+            if not inserted:
+                if request_row["status"] == "COMPLETED" and request_row["schedule_id"] is not None:
+                    conn.commit()
+                    return request_row["schedule_id"]
+                raise HTTPException(status_code=409, detail="SCHEDULE_CREATION_IN_PROGRESS")
+
+            if len(place_snapshots) != sum(len(day.stops) for day in schedule.days):
+                raise HTTPException(status_code=400, detail="SPONTANEOUS_PREVIEW_INVALID")
+            snapshot_index = 0
+            for day in schedule.days:
+                for stop in day.stops:
+                    place_id = resolve_spontaneous_place(cur, place_snapshots[snapshot_index])
+                    snapshot_index += 1
+                    stop.place.id = place_id
+
+            _save_spontaneous_schedule_rows(cur, schedule, owner_id, now)
+            cur.execute(
+                """
+                UPDATE schedule_creation_requests
+                SET status = 'COMPLETED', schedule_id = %s, response_status = 201,
+                    completed_at = %s, last_error_code = NULL
+                WHERE id = %s
+                """,
+                (schedule.id, now, request_row["id"]),
+            )
+        conn.commit()
+    return schedule.id
+
+
+def resolve_spontaneous_place(cur, snapshot: dict[str, Any]) -> int:
+    content_id = str(snapshot.get("externalContentId") or "").strip()
+    name = str(snapshot.get("name") or "").strip()
+    if not content_id or not name or len(content_id) > 255 or len(name) > 255:
+        raise HTTPException(status_code=400, detail="SPONTANEOUS_PREVIEW_INVALID")
+    try:
+        longitude = Decimal(str(snapshot["longitude"]))
+        latitude = Decimal(str(snapshot["latitude"]))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="SPONTANEOUS_PREVIEW_INVALID") from exc
+
+    cur.execute(
+        """
+        SELECT id, hidden_at FROM places
+        WHERE source = 'TOUR_API' AND external_content_id = %s
+        FOR UPDATE
+        """,
+        (content_id,),
+    )
+    existing = cur.fetchone()
+    if existing is not None:
+        if existing["hidden_at"] is not None:
+            raise HTTPException(status_code=422, detail="SPONTANEOUS_PLACE_HIDDEN")
+        return int(existing["id"])
+
+    now = datetime.now()
+    address = str(snapshot.get("address") or "").strip() or None
+    if address is not None:
+        address = address[:255]
+    cur.execute(
+        """
+        INSERT INTO places (
+            source, external_content_id, content_type_id, name, category, address,
+            longitude, latitude, primary_image_url, source_modified_at, last_seen_at,
+            last_synced_at, ingestion_status, ingestion_retry_count,
+            ingestion_last_error, ingestion_next_retry_at, created_at, updated_at
+        ) VALUES (
+            'TOUR_API', %(external_content_id)s, %(content_type_id)s, %(name)s,
+            %(category)s, %(address)s, %(longitude)s, %(latitude)s,
+            %(primary_image_url)s, NULL, %(now)s, NULL, 'PENDING', 0, NULL, NULL,
+            %(now)s, %(now)s
+        )
+        ON CONFLICT (source, external_content_id) DO NOTHING
+        RETURNING id, hidden_at
+        """,
+        {
+            "external_content_id": content_id,
+            "content_type_id": str(snapshot.get("contentTypeId") or "") or None,
+            "name": name,
+            "category": str(snapshot.get("category") or "")[:255] or None,
+            "address": address,
+            "longitude": longitude,
+            "latitude": latitude,
+            "primary_image_url": snapshot.get("primaryImageUrl"),
+            "now": now,
+        },
+    )
+    inserted = cur.fetchone()
+    if inserted is not None:
+        return int(inserted["id"])
+    cur.execute(
+        """
+        SELECT id, hidden_at FROM places
+        WHERE source = 'TOUR_API' AND external_content_id = %s
+        FOR UPDATE
+        """,
+        (content_id,),
+    )
+    raced = cur.fetchone()
+    if raced is None:
+        raise RuntimeError("TourAPI place upsert did not return a row")
+    if raced["hidden_at"] is not None:
+        raise HTTPException(status_code=422, detail="SPONTANEOUS_PLACE_HIDDEN")
+    return int(raced["id"])
+
+
+def _save_spontaneous_schedule_rows(cur, schedule: ScheduleResponse, owner_id: int, now: datetime) -> None:
+    day = schedule.days[0]
+    cur.execute(
+        """
+        INSERT INTO schedules (
+            id, status, start_date, end_date, daily_start_time, daily_end_time,
+            start_place_name, start_longitude, start_latitude,
+            end_place_name, end_longitude, end_latitude,
+            preview_id, time_zone, lodging_mode, route_coverage, planning_warnings_json,
+            style_summary, condition_json, user_id, schedule_type, transport_mode,
+            start_at, return_by, estimated_return_at, spontaneous_metadata_json,
+            created_at, updated_at
+        ) VALUES (
+            %(id)s, %(status)s, %(start_date)s, %(end_date)s, %(daily_start_time)s, %(daily_end_time)s,
+            %(start_place_name)s, %(start_longitude)s, %(start_latitude)s,
+            %(end_place_name)s, %(end_longitude)s, %(end_latitude)s,
+            NULL, %(time_zone)s, %(lodging_mode)s, %(route_coverage)s, %(planning_warnings_json)s,
+            %(style_summary)s, %(condition_json)s, %(user_id)s, 'SPONTANEOUS', %(transport_mode)s,
+            %(start_at)s, %(return_by)s, %(estimated_return_at)s, %(spontaneous_metadata_json)s,
+            %(created_at)s, %(updated_at)s
+        )
+        """,
+        {
+            "id": schedule.id,
+            "status": schedule.status,
+            "start_date": schedule.start_date,
+            "end_date": schedule.end_date,
+            "daily_start_time": schedule.daily_start_time,
+            "daily_end_time": schedule.daily_end_time,
+            "start_place_name": day.start_location.name,
+            "start_longitude": day.start_location.longitude,
+            "start_latitude": day.start_location.latitude,
+            "end_place_name": day.end_location.name if day.end_location else None,
+            "end_longitude": day.end_location.longitude if day.end_location else None,
+            "end_latitude": day.end_location.latitude if day.end_location else None,
+            "time_zone": schedule.planning_assumptions.time_zone,
+            "lodging_mode": schedule.planning_assumptions.lodging_mode,
+            "route_coverage": schedule.planning_assumptions.route_coverage,
+            "planning_warnings_json": json.dumps(schedule.planning_assumptions.warnings, ensure_ascii=False),
+            "style_summary": schedule.style_summary,
+            "condition_json": json.dumps(schedule.spontaneous_metadata or {}, ensure_ascii=False),
+            "user_id": owner_id,
+            "transport_mode": schedule.transport_mode,
+            "start_at": as_offset(schedule.start_at),
+            "return_by": as_offset(schedule.return_by),
+            "estimated_return_at": as_offset(schedule.estimated_return_at),
+            "spontaneous_metadata_json": json.dumps(schedule.spontaneous_metadata or {}, ensure_ascii=False),
+            "created_at": now.replace(tzinfo=None),
+            "updated_at": now.replace(tzinfo=None),
+        },
+    )
+    save_day(cur, schedule.id, day)
 
 
 def delete_schedule_children(cur, schedule_id: UUID) -> None:
@@ -453,9 +691,11 @@ def save_stop(cur, schedule_id: UUID, day: ScheduleDay, stop: ScheduleStop) -> N
         """
         INSERT INTO schedule_stops (
             id, schedule_day_id, place_id, stop_order, stay_minutes, arrive_at, depart_at,
+            arrive_at_datetime, depart_at_datetime, role, themes_json,
             selection_reasons_json, warnings_json, fixed_starts_at, fixed_ends_at
         ) VALUES (
             %(id)s, %(schedule_day_id)s, %(place_id)s, %(stop_order)s, %(stay_minutes)s, %(arrive_at)s, %(depart_at)s,
+            %(arrive_at_datetime)s, %(depart_at_datetime)s, %(role)s, %(themes_json)s,
             %(selection_reasons_json)s, %(warnings_json)s, %(fixed_starts_at)s, %(fixed_ends_at)s
         )
         """,
@@ -467,6 +707,10 @@ def save_stop(cur, schedule_id: UUID, day: ScheduleDay, stop: ScheduleStop) -> N
             "stay_minutes": stop.stay_minutes,
             "arrive_at": stop.arrive_at,
             "depart_at": stop.depart_at,
+            "arrive_at_datetime": as_offset(stop.arrive_at_datetime),
+            "depart_at_datetime": as_offset(stop.depart_at_datetime),
+            "role": stop.role,
+            "themes_json": json.dumps(stop.themes, ensure_ascii=False),
             "selection_reasons_json": json.dumps(stop.selection_reasons, ensure_ascii=False),
             "warnings_json": json.dumps(stop.warnings, ensure_ascii=False),
             "fixed_starts_at": as_offset(stop.fixed_starts_at),
@@ -511,10 +755,12 @@ def save_transit(
         """
         INSERT INTO transit_routes (
             id, schedule_day_id, schedule_stop_id, route_type, route_order, total_minutes, fare_amount,
-            provider, realtime_status, fallback_used, warnings_json, raw_json
+            provider, realtime_status, fallback_used, warnings_json, raw_json,
+            depart_at_datetime, arrive_at_datetime
         ) VALUES (
             %(id)s, %(schedule_day_id)s, %(schedule_stop_id)s, %(route_type)s, %(route_order)s, %(total_minutes)s, %(fare_amount)s,
-            %(provider)s, %(realtime_status)s, %(fallback_used)s, %(warnings_json)s, %(raw_json)s
+            %(provider)s, %(realtime_status)s, %(fallback_used)s, %(warnings_json)s, %(raw_json)s,
+            %(depart_at_datetime)s, %(arrive_at_datetime)s
         )
         """,
         {
@@ -530,6 +776,8 @@ def save_transit(
             "fallback_used": transit.fallback_used,
             "warnings_json": json.dumps(transit.warnings, ensure_ascii=False),
             "raw_json": json_dumps_model(transit),
+            "depart_at_datetime": as_offset(transit.depart_at_datetime),
+            "arrive_at_datetime": as_offset(transit.arrive_at_datetime),
         },
     )
     for segment in transit.segments:
@@ -719,10 +967,14 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
             # V7 이전에 저장된 방문지는 두 값이 없다. 그때는 null 로 둔다.
             arriveAt=row.get("arrive_at"),
             departAt=row.get("depart_at"),
+            arriveAtDateTime=row.get("arrive_at_datetime"),
+            departAtDateTime=row.get("depart_at_datetime"),
             place=place,
             inboundTransit=inbound,
             selectionReasons=selection_reasons,
             warnings=json.loads(row["warnings_json"] or "[]"),
+            role=row.get("role"),
+            themes=json.loads(row.get("themes_json") or "[]"),
             fixedStartsAt=fixed["starts_at"] if fixed else row["fixed_starts_at"],
             fixedEndsAt=fixed["ends_at"] if fixed else row["fixed_ends_at"],
             user_selected=is_user_selected_stop(selection_reasons),
@@ -771,6 +1023,12 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
                     routeCoverage=row["route_coverage"] or "SKELETON_ONLY",
                     warnings=warnings,
                 ),
+                scheduleType=row.get("schedule_type") or "PLANNED",
+                transportMode=row.get("transport_mode"),
+                startAt=row.get("start_at"),
+                returnBy=row.get("return_by"),
+                estimatedReturnAt=row.get("estimated_return_at"),
+                spontaneousMetadata=json.loads(row.get("spontaneous_metadata_json") or "null"),
             )
         )
     return ScheduleListResponse(items=items)
@@ -824,6 +1082,8 @@ def route_to_model(row: dict[str, Any] | None) -> ScheduleTransit | None:
             "summary": raw.get("summary"),
             "departAt": raw.get("departAt"),
             "arriveAt": raw.get("arriveAt"),
+            "departAtDateTime": row.get("depart_at_datetime") or raw.get("departAtDateTime"),
+            "arriveAtDateTime": row.get("arrive_at_datetime") or raw.get("arriveAtDateTime"),
             "totalMinutes": row["total_minutes"],
             "walkMinutes": raw.get("walkMinutes", row["total_minutes"]),
             "waitMinutes": raw.get("waitMinutes", 0),

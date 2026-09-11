@@ -179,6 +179,8 @@ class ScheduleTransit(BaseModel):
     summary: str | None = None
     depart_at: time | None = Field(default=None, alias="departAt")
     arrive_at: time | None = Field(default=None, alias="arriveAt")
+    depart_at_datetime: datetime | None = Field(default=None, alias="departAtDateTime")
+    arrive_at_datetime: datetime | None = Field(default=None, alias="arriveAtDateTime")
     total_minutes: int = Field(default=0, alias="totalMinutes")
     walk_minutes: int = Field(default=0, alias="walkMinutes")
     wait_minutes: int = Field(default=0, alias="waitMinutes")
@@ -199,6 +201,8 @@ class ScheduleStop(BaseModel):
     order: int
     arrive_at: time | None = Field(default=None, alias="arriveAt")
     depart_at: time | None = Field(default=None, alias="departAt")
+    arrive_at_datetime: datetime | None = Field(default=None, alias="arriveAtDateTime")
+    depart_at_datetime: datetime | None = Field(default=None, alias="departAtDateTime")
     stay_minutes: int = Field(alias="stayMinutes")
     place: SchedulePlace
     inbound_transit: ScheduleTransit | None = Field(default=None, alias="inboundTransit")
@@ -208,6 +212,8 @@ class ScheduleStop(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     fixed_starts_at: datetime | None = Field(default=None, alias="fixedStartsAt")
     fixed_ends_at: datetime | None = Field(default=None, alias="fixedEndsAt")
+    role: str | None = None
+    themes: list[str] = Field(default_factory=list)
     user_selected: bool = Field(default=False, exclude=True)
 
 
@@ -260,6 +266,14 @@ class ScheduleResponse(BaseModel):
     planning_assumptions: PlanningAssumptions | None = Field(
         default=None, alias="planningAssumptions"
     )
+    schedule_type: str = Field(default="PLANNED", alias="scheduleType")
+    transport_mode: str | None = Field(default=None, alias="transportMode")
+    start_at: datetime | None = Field(default=None, alias="startAt")
+    return_by: datetime | None = Field(default=None, alias="returnBy")
+    estimated_return_at: datetime | None = Field(default=None, alias="estimatedReturnAt")
+    spontaneous_metadata: dict[str, Any] | None = Field(
+        default=None, alias="spontaneousMetadata"
+    )
 
 
 class ScheduleListResponse(BaseModel):
@@ -285,6 +299,8 @@ class StopMarker(BaseModel):
     name: str
     arrive_at: time | None = Field(default=None, alias="arriveAt")
     depart_at: time | None = Field(default=None, alias="departAt")
+    arrive_at_datetime: datetime | None = Field(default=None, alias="arriveAtDateTime")
+    depart_at_datetime: datetime | None = Field(default=None, alias="departAtDateTime")
     subtitle: str | None = None
     risk_level: str = Field(default="NORMAL", alias="riskLevel")
     longitude: Decimal | None = None

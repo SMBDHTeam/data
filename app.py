@@ -51,8 +51,16 @@ from spontaneous.models import (
     SpontaneousCourseResponse,
     SpontaneousDestinationRequest,
     SpontaneousDestinationResponse,
+    SpontaneousScheduleRequest,
     TransportMode,
 )
+from spontaneous.preview import (
+    build_course_snapshot,
+    create_preview_token,
+    public_preview_course,
+    public_preview_route_lines,
+)
+from spontaneous.schedule_service import save_spontaneous_preview
 
 from spontaneous.destinations import (
     DESTINATION_ZONES,
@@ -92,7 +100,6 @@ from spontaneous.course import (
     calculate_sequential_course_timeline,
     has_required_course_roles,
     has_required_theme_coverage,
-    public_course_stop,
 )
 from spontaneous.planner import CourseCandidateSearch, course_identity, rank_course_candidates
 from spontaneous.time_profile import DESTINATION_FINAL_TIME_SCALE, resolve_time_profile
@@ -794,8 +801,12 @@ def recommend_spontaneous_destinations(
 @app.post("/api/v1/spontaneous-trips/course", response_model=SpontaneousCourseResponse)
 def create_spontaneous_course(
     request: SpontaneousCourseRequest,
+    auth_user_id: int | None = Header(default=None, alias="X-Auth-User-Id"),
 ) -> SpontaneousCourseResponse:
     started_at = monotonic()
+    # Unit callers invoke the function directly, in which case FastAPI leaves the
+    # Header descriptor in the default argument. Only an actual integer is trusted.
+    auth_user_id = auth_user_id if isinstance(auth_user_id, int) else None
     validate_spontaneous_request_time(request)
     time_profile = resolve_time_profile(request.startAt)
 
@@ -1035,6 +1046,10 @@ def create_spontaneous_course(
                 request.startAt.isoformat(), time_profile.value if time_profile else None,
             )
 
+            snapshot = build_course_snapshot(request, zone, timeline)
+            preview_id, preview_token, preview_expires_at = create_preview_token(
+                snapshot, auth_user_id
+            )
             return {
                 "destinationId": zone.destination_id,
                 "name": zone.name,
@@ -1044,10 +1059,14 @@ def create_spontaneous_course(
                 ],
                 "estimatedReturnAt": estimated_return_at.isoformat(),
                 "returnBy": request.returnBy.isoformat(),
-                "course": [
-                    public_course_stop(stop)
-                    for stop in timeline["course"]
-                ],
+                "previewId": preview_id,
+                "previewToken": preview_token,
+                "previewExpiresAt": preview_expires_at,
+                "startLocation": request.startLocation,
+                "startAt": request.startAt,
+                "course": public_preview_course(snapshot),
+                "finalTransit": timeline["finalTransit"],
+                "routeLines": public_preview_route_lines(snapshot),
             }
 
         attempt_failed("RETURN_TIME_EXCEEDED")
@@ -1061,4 +1080,23 @@ def create_spontaneous_course(
         bool(search.pending), request.transportMode.value,
     )
     reject_course(last_failure_reason)
+
+
+@app.post(
+    "/api/v1/spontaneous-trips/schedules",
+    response_model=ScheduleResponse,
+    status_code=201,
+)
+def save_spontaneous_schedule_endpoint(
+    payload: SpontaneousScheduleRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    auth_user_id: int | None = Header(default=None, alias="X-Auth-User-Id"),
+) -> ScheduleResponse:
+    """Persist exactly the signed preview after the user explicitly saves it."""
+    return save_spontaneous_preview(
+        payload.previewId,
+        payload.previewToken,
+        auth_user_id,
+        idempotency_key,
+    )
 # -------

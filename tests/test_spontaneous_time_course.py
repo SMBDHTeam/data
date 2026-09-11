@@ -228,7 +228,7 @@ class TimeAwareCourseTest(TestCase):
         self.assertEqual(datetime.fromisoformat(local_body["course"][0]["arrivalAt"]),
                          datetime.fromisoformat(utc_body["course"][0]["arrivalAt"]))
 
-    def test_course_logs_profile_without_new_response_fields(self):
+    def test_course_logs_profile_and_returns_preview_fields(self):
         with providers([place("c")]), self.assertLogs("data.app", level="INFO") as logs:
             body = self.assert_success(post_json(COURSE_URL, trip(20, 180, ("CAFE",))))
         message = "\n".join(logs.output)
@@ -236,7 +236,10 @@ class TimeAwareCourseTest(TestCase):
         self.assertIn("stops=1", message)
         self.assertNotIn("test-key", message)
         self.assertEqual(set(body), {"destinationId", "name", "transportMode", "returnTravelMinutes",
-                                     "estimatedReturnAt", "returnBy", "course"})
+                                     "estimatedReturnAt", "returnBy", "course", "previewId",
+                                     "previewToken", "previewExpiresAt", "startLocation", "startAt",
+                                     "finalTransit", "routeLines"})
         self.assertEqual(set(body["course"][0]), {"order", "role", "name", "contentId", "contentTypeId",
                                                  "latitude", "longitude", "travelMinutesFromPrevious",
-                                                 "arrivalAt", "departureAt", "stayMinutes", "themes"})
+                                                 "arrivalAt", "departureAt", "stayMinutes", "themes",
+                                                 "place", "inboundTransit"})

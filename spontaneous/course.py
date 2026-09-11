@@ -6,7 +6,9 @@ from spontaneous.models import Coordinate, TransportMode
 from spontaneous.places import SEAFOOD_MENU_KEYWORDS
 from spontaneous.time_profile import calculate_time_fit_bonus, resolve_time_profile
 from spontaneous.routing import (
+    RouteResult,
     RouteResultCache,
+    TransitLeg,
     search_route,
 )
 
@@ -1198,6 +1200,7 @@ def calculate_sequential_course_timeline(
         raise ValueError("COURSE_NOT_FEASIBLE")
 
     cursor_location = start_location
+    cursor_name = start_location.name or "출발지"
     cursor_time = start_at
     timeline = []
 
@@ -1222,16 +1225,28 @@ def calculate_sequential_course_timeline(
             minutes=item["stayMinutes"]
         )
 
+        inbound_transit = route_result_to_transit(
+            route,
+            cursor_name,
+            item["name"],
+            cursor_location,
+            place_location,
+            route_order=index + 1,
+            route_type="INBOUND",
+        )
+
         timeline.append(
             {
                 **item,
                 "travelMinutesFromPrevious": route.travelMinutes,
                 "arrivalAt": route.arrivalAt.isoformat(),
                 "departureAt": departure_at.isoformat(),
+                "inboundTransit": inbound_transit,
             }
         )
 
         cursor_location = place_location
+        cursor_name = item["name"]
         cursor_time = departure_at
 
     return_route = search_route(
@@ -1245,10 +1260,124 @@ def calculate_sequential_course_timeline(
     if return_route is None:
         raise CourseTimelineError("NO_ROUTE", len(course) - 1)
 
+    final_transit = route_result_to_transit(
+        return_route,
+        cursor_name,
+        start_location.name or "출발지",
+        cursor_location,
+        start_location,
+        route_order=len(course) + 1,
+        route_type="FINAL",
+    )
+
     return {
         "course": timeline,
         "returnTravelMinutes": return_route.travelMinutes,
         "estimatedReturnAt": return_route.arrivalAt,
+        "finalTransit": final_transit,
+    }
+
+
+def route_result_to_transit(
+    route: RouteResult,
+    origin_name: str,
+    destination_name: str,
+    origin: Coordinate,
+    destination: Coordinate,
+    *,
+    route_order: int,
+    route_type: str,
+) -> dict:
+    """Expose only route facts returned by the provider.
+
+    A provider route can omit detailed legs or geometry. Keep the verified
+    aggregate duration/mode, but never fill missing station names, coordinates,
+    or guidance from the request endpoints.
+    """
+    wait_minutes = max(
+        0,
+        int((route.departureAt - route.requestedDepartureAt).total_seconds() // 60),
+    )
+    realtime_status = (
+        "PARTIAL"
+        if "BIMS" in route.provider or "TIMETABLE" in route.provider
+        else "UNAVAILABLE"
+    )
+    provider_legs = list(route.legs)
+    legs = provider_legs or [
+        TransitLeg(
+            mode=route.mode.value,
+            sectionTime=route.travelMinutes,
+        )
+    ]
+    segments = []
+    route_lines = []
+
+    for index, leg in enumerate(legs, start=1):
+        station_ids = list(leg.stationIds)
+        segments.append(
+            {
+                "order": index,
+                "mode": leg.mode,
+                "lineName": leg.route,
+                "startStationId": station_ids[0] if station_ids else None,
+                "startStationName": leg.startName,
+                "endStationId": station_ids[-1] if station_ids else None,
+                "endStationName": leg.endName,
+                "instruction": "",
+                "durationMinutes": leg.sectionTime or 0,
+                "distanceMeters": None,
+                "stationCount": len(station_ids) or None,
+                "waitMinutes": wait_minutes if index == 1 else 0,
+                "realtimeStatus": realtime_status,
+            }
+        )
+        coordinates = []
+        if leg.startLongitude is not None and leg.startLatitude is not None:
+            coordinates.append([leg.startLongitude, leg.startLatitude])
+        if leg.endLongitude is not None and leg.endLatitude is not None:
+            coordinates.append([leg.endLongitude, leg.endLatitude])
+        route_lines.append(
+            {
+                "mode": leg.mode,
+                "lineName": leg.route,
+                "startName": leg.startName,
+                "endName": leg.endName,
+                "durationMinutes": leg.sectionTime,
+                "distanceMeters": None,
+                "instruction": "",
+                "fallbackUsed": True,
+                "coordinates": coordinates,
+            }
+        )
+
+    walk_minutes = sum(
+        (leg.sectionTime or 0) for leg in legs if leg.mode.upper() == "WALK"
+    )
+    return {
+        "routeType": route_type,
+        "routeOrder": route_order,
+        "originName": origin_name,
+        "destinationName": destination_name,
+        "summary": f"{origin_name} → {destination_name}",
+        "departAt": route.departureAt.timetz().replace(tzinfo=None).isoformat(),
+        "arriveAt": route.arrivalAt.timetz().replace(tzinfo=None).isoformat(),
+        "departAtDateTime": route.departureAt.isoformat(),
+        "arriveAtDateTime": route.arrivalAt.isoformat(),
+        "totalMinutes": route.travelMinutes,
+        "walkMinutes": walk_minutes,
+        "waitMinutes": wait_minutes,
+        "transferCount": max(
+            0,
+            len([leg for leg in legs if leg.mode.upper() not in {"WALK"}]) - 1,
+        ),
+        "fareAmount": None,
+        "provider": route.provider,
+        "realtimeStatus": realtime_status,
+        "fallbackUsed": False,
+        "segments": segments,
+        "warnings": ["제공사가 상세 경로 선형을 제공하지 않았습니다."],
+        "route_lines": route_lines,
     }
 
 

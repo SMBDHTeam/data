@@ -7,6 +7,10 @@ from fastapi import HTTPException
 from spontaneous.models import Coordinate, SpontaneousCourseRequest, TransportMode
 from spontaneous.preview import create_preview_token, verify_preview_token
 from spontaneous.schedule_service import schedule_from_snapshot, save_spontaneous_preview
+from schedule.models import ScheduleUpdateRequest
+from schedule.persistence import as_korea_offset
+from schedule.service import update_spontaneous_schedule
+from spontaneous.routing import RouteResult
 
 
 KST = timezone(timedelta(hours=9))
@@ -122,6 +126,11 @@ class SpontaneousScheduleSaveTest(TestCase):
         self.assertEqual(expired.exception.status_code, 410)
         self.assertEqual(expired.exception.detail, "SPONTANEOUS_PREVIEW_EXPIRED")
 
+    def test_configured_preview_secret_must_be_at_least_32_bytes(self):
+        with mock.patch.dict("os.environ", {"SPONTANEOUS_PREVIEW_SECRET": "too-short"}):
+            with self.assertRaisesRegex(RuntimeError, "at least 32 bytes"):
+                create_preview_token(snapshot(), owner_id=7)
+
     def test_cross_midnight_schedule_preserves_full_datetimes_and_metadata(self):
         schedule, places = schedule_from_snapshot(snapshot(), uuid4())
 
@@ -133,6 +142,45 @@ class SpontaneousScheduleSaveTest(TestCase):
         self.assertIsNone(schedule.days[0].stops[0].fixed_starts_at)
         self.assertEqual(schedule.spontaneous_metadata["destinationId"], "BUSAN_GWANGALLI")
         self.assertEqual(places[0]["externalContentId"], "123")
+
+    def test_postgres_timestamps_are_returned_in_korea_calendar_zone(self):
+        stored_utc = datetime(2026, 9, 11, 15, 5, tzinfo=timezone.utc)
+
+        restored = as_korea_offset(stored_utc)
+
+        self.assertEqual(restored.isoformat(), "2026-09-12T00:05:00+09:00")
+
+    def test_patch_keeps_mode_return_limit_and_cross_midnight_datetimes(self):
+        schedule, _ = schedule_from_snapshot(snapshot(), uuid4())
+        stop = schedule.days[0].stops[0]
+        start = schedule.start_at
+        arrival = datetime(2026, 9, 12, 0, 10, tzinfo=KST)
+        departure = datetime(2026, 9, 12, 1, 10, tzinfo=KST)
+        returned = datetime(2026, 9, 12, 1, 45, tzinfo=KST)
+        routes = [
+            RouteResult(40, start, start, arrival, TransportMode.CAR, "TMAP"),
+            RouteResult(35, departure, departure, returned, TransportMode.CAR, "TMAP"),
+        ]
+        request = ScheduleUpdateRequest.model_validate({
+            "stops": [{
+                "stopId": str(stop.id),
+                "dayNo": 1,
+                "order": 1,
+                "stayMinutes": 60,
+            }]
+        })
+
+        with mock.patch("spontaneous.routing.search_route", side_effect=routes), mock.patch(
+            "schedule.service.db_enabled", return_value=False
+        ):
+            updated = update_spontaneous_schedule(schedule, request)
+
+        self.assertEqual(updated.transport_mode, "CAR")
+        self.assertEqual(updated.return_by, schedule.return_by)
+        self.assertEqual(updated.spontaneous_metadata, schedule.spontaneous_metadata)
+        self.assertEqual(updated.days[0].stops[0].arrive_at_datetime, arrival)
+        self.assertEqual(updated.days[0].final_transit.arrive_at_datetime, returned)
+        self.assertEqual(updated.estimated_return_at, returned)
 
     def test_save_requires_auth_key_and_database_before_persistence(self):
         preview_id, token, _ = create_preview_token(snapshot(), owner_id=7)

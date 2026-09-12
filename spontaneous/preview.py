@@ -17,6 +17,7 @@ from fastapi import HTTPException
 log = logging.getLogger("data.spontaneous.preview")
 TOKEN_VERSION = "v1"
 DEFAULT_TTL_SECONDS = 20 * 60
+MIN_SECRET_BYTES = 32
 _EPHEMERAL_SECRET = secrets.token_bytes(32)
 _warned_ephemeral_secret = False
 
@@ -190,7 +191,12 @@ def _secret() -> bytes:
     global _warned_ephemeral_secret
     configured = os.getenv("SPONTANEOUS_PREVIEW_SECRET")
     if configured:
-        return configured.encode("utf-8")
+        secret = configured.encode("utf-8")
+        if len(secret) < MIN_SECRET_BYTES:
+            raise RuntimeError(
+                f"SPONTANEOUS_PREVIEW_SECRET must be at least {MIN_SECRET_BYTES} bytes"
+            )
+        return secret
     if not _warned_ephemeral_secret:
         log.warning(
             "SPONTANEOUS_PREVIEW_SECRET is not configured; using a process-local secret. "

@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 import psycopg
@@ -42,6 +43,7 @@ from schedule.models import (
 )
 
 log = logging.getLogger("data.schedule.persistence")
+KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 CONTENT_TYPE_FALLBACK_LABELS = {
     "12": "관광지",
@@ -450,7 +452,17 @@ def save_spontaneous_schedule(
                 )
                 duplicate_preview = cur.fetchone()
                 if duplicate_preview is not None:
-                    raise HTTPException(status_code=409, detail="SPONTANEOUS_PREVIEW_ALREADY_SAVED")
+                    schedule_id = duplicate_preview["schedule_id"]
+                    headers = (
+                        {"X-Schedule-Id": str(schedule_id)}
+                        if schedule_id is not None
+                        else None
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail="SPONTANEOUS_PREVIEW_ALREADY_SAVED",
+                        headers=headers,
+                    )
                 raise RuntimeError("Failed to claim spontaneous schedule request")
             if request_row["request_hash"] != request_hash:
                 raise HTTPException(status_code=409, detail="IDEMPOTENCY_KEY_REUSED")
@@ -967,8 +979,8 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
             # V7 이전에 저장된 방문지는 두 값이 없다. 그때는 null 로 둔다.
             arriveAt=row.get("arrive_at"),
             departAt=row.get("depart_at"),
-            arriveAtDateTime=row.get("arrive_at_datetime"),
-            departAtDateTime=row.get("depart_at_datetime"),
+            arriveAtDateTime=as_korea_offset(row.get("arrive_at_datetime")),
+            departAtDateTime=as_korea_offset(row.get("depart_at_datetime")),
             place=place,
             inboundTransit=inbound,
             selectionReasons=selection_reasons,
@@ -1025,9 +1037,9 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
                 ),
                 scheduleType=row.get("schedule_type") or "PLANNED",
                 transportMode=row.get("transport_mode"),
-                startAt=row.get("start_at"),
-                returnBy=row.get("return_by"),
-                estimatedReturnAt=row.get("estimated_return_at"),
+                startAt=as_korea_offset(row.get("start_at")),
+                returnBy=as_korea_offset(row.get("return_by")),
+                estimatedReturnAt=as_korea_offset(row.get("estimated_return_at")),
                 spontaneousMetadata=json.loads(row.get("spontaneous_metadata_json") or "null"),
             )
         )
@@ -1082,8 +1094,8 @@ def route_to_model(row: dict[str, Any] | None) -> ScheduleTransit | None:
             "summary": raw.get("summary"),
             "departAt": raw.get("departAt"),
             "arriveAt": raw.get("arriveAt"),
-            "departAtDateTime": row.get("depart_at_datetime") or raw.get("departAtDateTime"),
-            "arriveAtDateTime": row.get("arrive_at_datetime") or raw.get("arriveAtDateTime"),
+            "departAtDateTime": as_korea_offset(row.get("depart_at_datetime")) or raw.get("departAtDateTime"),
+            "arriveAtDateTime": as_korea_offset(row.get("arrive_at_datetime")) or raw.get("arriveAtDateTime"),
             "totalMinutes": row["total_minutes"],
             "walkMinutes": raw.get("walkMinutes", row["total_minutes"]),
             "waitMinutes": raw.get("waitMinutes", 0),
@@ -1153,3 +1165,17 @@ def as_offset(value: datetime | None):
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def as_korea_offset(value: datetime | None):
+    """Return PostgreSQL timestamptz values in the service's calendar zone.
+
+    PostgreSQL stores an instant rather than the input offset.  The database
+    session commonly returns UTC, which would move an after-midnight KST visit
+    onto the previous calendar date in API responses and subsequent PATCHes.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(KOREA_TIMEZONE)

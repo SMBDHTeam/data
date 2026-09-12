@@ -638,6 +638,8 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
             ]
         )
         existing = get_schedule(schedule_id)
+        if existing.schedule_type == "SPONTANEOUS":
+            return update_spontaneous_schedule(existing, request)
         days_by_no = {day.day_no: day.model_copy(deep=True) for day in existing.days}
         existing_stop_index = {
             stop.id: (day.day_no, stop)
@@ -700,6 +702,142 @@ def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> Schedu
         return saved
 
 
+def update_spontaneous_schedule(
+    existing: ScheduleResponse,
+    request: ScheduleUpdateRequest,
+) -> ScheduleResponse:
+    """Re-route a saved spontaneous trip without changing its defining constraints."""
+    from spontaneous.course import route_result_to_transit
+    from spontaneous.models import Coordinate, TransportMode
+    from spontaneous.routing import RoutingApiError, search_route
+
+    if existing.start_at is None or existing.return_by is None or not existing.transport_mode:
+        raise HTTPException(status_code=409, detail="SPONTANEOUS_SCHEDULE_METADATA_MISSING")
+    if len(existing.days) != 1 or any(stop.day_no != 1 for stop in request.stops):
+        raise HTTPException(status_code=400, detail="SPONTANEOUS_SCHEDULE_DAY_INVALID")
+
+    original_by_id = {stop.id: stop for stop in existing.days[0].stops}
+    selected: list[ScheduleStop] = []
+    for patch_stop in sorted(request.stops, key=lambda value: value.order):
+        if patch_stop.stop_id is not None:
+            original = original_by_id.get(patch_stop.stop_id)
+            if original is None:
+                raise HTTPException(status_code=404, detail=f"stopId {patch_stop.stop_id} not found")
+            stop = original.model_copy(deep=True)
+            stop.stay_minutes = patch_stop.stay_minutes
+        else:
+            stop = candidate_stop(
+                order=patch_stop.order,
+                stay_minutes=patch_stop.stay_minutes,
+                candidate=resolve_place_or_400(patch_stop.place_id),
+                selection_reasons=["사용자가 즉흥여행 일정에 추가한 방문지입니다."],
+                user_selected=True,
+            )
+        stop.order = len(selected) + 1
+        selected.append(stop)
+
+    day = existing.days[0].model_copy(deep=True)
+    start_location = day.start_location
+    if start_location is None or start_location.latitude is None or start_location.longitude is None:
+        raise HTTPException(status_code=409, detail="SPONTANEOUS_SCHEDULE_METADATA_MISSING")
+    mode = TransportMode(existing.transport_mode)
+    cursor_location = Coordinate(
+        name=start_location.name,
+        latitude=float(start_location.latitude),
+        longitude=float(start_location.longitude),
+    )
+    cursor_name = start_location.name
+    cursor_time = existing.start_at
+    rebuilt: list[ScheduleStop] = []
+    for stop in selected:
+        if stop.place.latitude is None or stop.place.longitude is None:
+            raise HTTPException(status_code=422, detail="SPONTANEOUS_PLACE_COORDINATES_MISSING")
+        destination = Coordinate(
+            name=stop.place.name,
+            latitude=float(stop.place.latitude),
+            longitude=float(stop.place.longitude),
+        )
+        try:
+            route = search_route(mode, cursor_location, destination, cursor_time)
+        except RoutingApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        if route is None:
+            raise HTTPException(status_code=422, detail="NO_ROUTE")
+        departure_at = route.arrivalAt + timedelta(minutes=stop.stay_minutes)
+        rebuilt_stop = stop.model_copy(deep=True)
+        rebuilt_stop.arrive_at = route.arrivalAt.timetz().replace(tzinfo=None)
+        rebuilt_stop.depart_at = departure_at.timetz().replace(tzinfo=None)
+        rebuilt_stop.arrive_at_datetime = route.arrivalAt
+        rebuilt_stop.depart_at_datetime = departure_at
+        rebuilt_stop.inbound_transit = ScheduleTransit.model_validate(
+            route_result_to_transit(
+                route,
+                cursor_name,
+                stop.place.name,
+                cursor_location,
+                destination,
+                route_order=stop.order,
+                route_type="INBOUND",
+            )
+        )
+        rebuilt.append(rebuilt_stop)
+        cursor_location = destination
+        cursor_name = stop.place.name
+        cursor_time = departure_at
+
+    return_location = Coordinate(
+        name=start_location.name,
+        latitude=float(start_location.latitude),
+        longitude=float(start_location.longitude),
+    )
+    try:
+        return_route = search_route(mode, cursor_location, return_location, cursor_time)
+    except RoutingApiError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    if return_route is None:
+        raise HTTPException(status_code=422, detail="NO_ROUTE")
+    if return_route.arrivalAt > existing.return_by:
+        raise HTTPException(status_code=422, detail="SPONTANEOUS_RETURN_TIME_EXCEEDED")
+
+    day.stops = rebuilt
+    day.end_time = return_route.arrivalAt.timetz().replace(tzinfo=None)
+    day.final_transit = ScheduleTransit.model_validate(
+        route_result_to_transit(
+            return_route,
+            cursor_name,
+            start_location.name,
+            cursor_location,
+            return_location,
+            route_order=len(rebuilt) + 1,
+            route_type="FINAL",
+        )
+    )
+    day.summary = f"{len(rebuilt)}개 방문지 (즉흥여행 경로 재계산)"
+    updated = existing.model_copy(deep=True)
+    updated.days = [day]
+    updated.end_date = return_route.arrivalAt.date()
+    updated.daily_end_time = day.end_time
+    updated.estimated_return_at = return_route.arrivalAt
+    updated.planning_assumptions = PlanningAssumptions(
+        timeZone=(existing.planning_assumptions.time_zone if existing.planning_assumptions else "Asia/Seoul"),
+        lodgingMode="NOT_APPLICABLE",
+        routeCoverage="SPONTANEOUS_PROVIDER_ROUTE",
+        warnings=dedupe_warnings(
+            warning
+            for transit in [*(stop.inbound_transit for stop in rebuilt), day.final_transit]
+            if transit is not None
+            for warning in transit.warnings
+        ),
+    )
+    if db_enabled():
+        save_schedule_to_db(
+            updated,
+            condition_request=updated.spontaneous_metadata or {},
+        )
+        return load_schedule_from_db(updated.id)
+    return STORE.save(updated)
+
+
 def get_schedule_map(schedule_id: UUID, day_no: int | None) -> ScheduleMapResponse:
     schedule = get_schedule(schedule_id)
     days = [day for day in schedule.days if day_no is None or day.day_no == day_no]
@@ -721,6 +859,8 @@ def get_schedule_map(schedule_id: UUID, day_no: int | None) -> ScheduleMapRespon
                     name=stop.place.name,
                     arriveAt=stop.arrive_at,
                     departAt=stop.depart_at,
+                    arriveAtDateTime=stop.arrive_at_datetime,
+                    departAtDateTime=stop.depart_at_datetime,
                     subtitle=stop.place.category_label,
                     riskLevel="NORMAL",
                     longitude=stop.place.longitude,

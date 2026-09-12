@@ -79,6 +79,7 @@ jobs:
           SPRING_DATASOURCE_PASSWORD: ${{ secrets.SPRING_DATASOURCE_PASSWORD }}
           SKT_API_KEY: ${{ secrets.SKT_API_KEY }}
           TOUR_API_KEY: ${{ secrets.TOUR_API_KEY }}
+          SPONTANEOUS_PREVIEW_SECRET: ${{ secrets.SPONTANEOUS_PREVIEW_SECRET }}
 
 
         run: |
@@ -99,6 +100,7 @@ jobs:
             SPRING_DATASOURCE_PASSWORD
             SKT_API_KEY
             TOUR_API_KEY
+            SPONTANEOUS_PREVIEW_SECRET
           )
 
           for variable_name in "${required_variables[@]}"; do
@@ -107,6 +109,20 @@ jobs:
               exit 1
             fi
           done
+
+          preview_secret_bytes="$(printf '%s' "$SPONTANEOUS_PREVIEW_SECRET" | wc -c | tr -d '[:space:]')"
+          if [ "$preview_secret_bytes" -lt 32 ]; then
+            echo "ERROR: SPONTANEOUS_PREVIEW_SECRET must be at least 32 bytes"
+            exit 1
+          fi
+          unset preview_secret_bytes
+
+          case "$SPONTANEOUS_PREVIEW_SECRET" in
+            *$'\n'*|*$'\r'*)
+              echo "ERROR: SPONTANEOUS_PREVIEW_SECRET must be a single-line value"
+              exit 1
+              ;;
+          esac
 
           echo "Prepare SSH"
 
@@ -136,6 +152,7 @@ jobs:
             printf 'TMAP_TRANSIT_BASE_URL=https://apis.openapi.sk.com\n'
             printf 'SKT_API_KEY=%s\n' "$SKT_API_KEY"
             printf 'ODSAY_ENABLED=false\n'
+            printf 'SPONTANEOUS_PREVIEW_SECRET=%s\n' "$SPONTANEOUS_PREVIEW_SECRET"
           } > .env.dev
 
           chmod 600 .env.dev
@@ -168,6 +185,8 @@ jobs:
             "$DEV_SSH_USER@$DEV_HOST" \
             "
             set -e
+
+            chmod 600 /opt/hackathon-dev/.env.dev
 
             echo '[1/6] Login ECR'
 

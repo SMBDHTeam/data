@@ -1,7 +1,11 @@
 from datetime import datetime
 from enum import Enum
 
+from uuid import UUID
+
 from pydantic import BaseModel, Field
+
+from schedule.models import RouteLine, SchedulePlace, ScheduleTransit
 
 
 class TransportMode(str, Enum):
@@ -34,6 +38,8 @@ class CourseRole(str, Enum):
 class Coordinate(BaseModel):
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
+    name: str | None = None
+    address: str | None = None
 
 
 class SpontaneousDestinationRequest(BaseModel):
@@ -86,6 +92,8 @@ class SpontaneousCourseStop(BaseModel):
     departureAt: datetime | None = None
     stayMinutes: int
     themes: list[TravelTheme] = Field(default_factory=list)
+    place: SchedulePlace | None = None
+    inboundTransit: ScheduleTransit | None = None
 
 
 class SpontaneousCourseResponse(BaseModel):
@@ -96,6 +104,13 @@ class SpontaneousCourseResponse(BaseModel):
     estimatedReturnAt: datetime | None = None
     returnBy: datetime | None = None
     course: list[SpontaneousCourseStop] = Field(default_factory=list)
+    previewId: UUID | None = None
+    previewToken: str | None = None
+    previewExpiresAt: datetime | None = None
+    startLocation: Coordinate | None = None
+    startAt: datetime | None = None
+    finalTransit: ScheduleTransit | None = None
+    routeLines: list[RouteLine] = Field(default_factory=list)
 
 
 class SpontaneousCourseRequest(BaseModel):
@@ -105,3 +120,8 @@ class SpontaneousCourseRequest(BaseModel):
     returnBy: datetime
     desiredThemes: list[TravelTheme] = Field(default_factory=list)
     transportMode: TransportMode
+
+
+class SpontaneousScheduleRequest(BaseModel):
+    previewId: UUID
+    previewToken: str = Field(min_length=32, max_length=200_000)

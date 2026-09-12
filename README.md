@@ -76,13 +76,30 @@
 
 - `POST /api/v1/spontaneous-trips/destinations`
 - `POST /api/v1/spontaneous-trips/course`
+- `POST /api/v1/spontaneous-trips/schedules`
 
 현재 상태:
 
 - 출발 위치/시간/희망 테마 기준 목적지 추천 가능
-- 선택한 목적지 기준 즉흥 코스 생성 가능
+- 선택한 목적지 기준 즉흥 코스 미리보기 생성 가능
+- 사용자가 저장을 확정한 미리보기를 공통 일정 구조로 저장 가능
 - 교통수단별 이동 가능 여부 반영
-- stop별 시간 정보와 마지막 복귀 시간 포함
+- stop별 장소·이동 구간·지도선과 마지막 복귀 시간 포함
+
+`/course`는 계산 전용이다. `schedules`, `schedule_*`, `transit_*`, `places`,
+`place_images` 등 비즈니스 테이블을 쓰지 않으며, 응답의 `previewToken`에 서버가 계산한
+코스 스냅샷을 HMAC으로 서명한다. Spring이 전달한 현재 사용자 ID도 서명 범위에 포함된다.
+
+클라이언트가 저장 버튼을 누를 때만 `/spontaneous-trips/schedules`를 호출한다. 요청 본문은
+`previewId`, `previewToken`, 헤더는 `Idempotency-Key`와 Spring 내부
+`X-Auth-User-Id`를 사용한다. 저장은 장소 식별, 공통 일정/정류장/이동 경로 저장,
+멱등성 완료 처리를 한 DB 트랜잭션으로 커밋한다. 저장 과정에서 코스 생성기를 다시
+실행하지 않는다.
+
+운영 환경의 모든 data 인스턴스에는 같은 고엔트로피
+`SPONTANEOUS_PREVIEW_SECRET`을 설정해야 한다. 기본 만료 시간은 20분이며
+`SPONTANEOUS_PREVIEW_TTL_SECONDS`로 조정한다. 설정하지 않은 로컬 실행은 프로세스별
+임시 키를 사용하므로 재시작 또는 다른 인스턴스를 거친 저장은 의도적으로 실패한다.
 
 ## 일정 생성 동작 방식
 

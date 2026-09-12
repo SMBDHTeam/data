@@ -95,15 +95,26 @@ class SpontaneousCourseEndpointTest(TestCase):
             with self.subTest(hours=hours), provider_boundaries(opening_hours=hours):
                 self.assert_rejected(course_request(), "PLACE_CLOSED_AT_VISIT_TIME")
 
-    def test_existing_all_day_course_success_and_response_shape_are_preserved(self):
-        with provider_boundaries(opening_hours="00:00~23:59"):
+    def test_course_preview_exposes_save_token_without_database_writes(self):
+        with provider_boundaries(opening_hours="00:00~23:59"), patch(
+            "schedule.persistence.connect"
+        ) as database_connect:
             with self.assertLogs("data.app", level="INFO") as logs:
                 response = data_app.create_spontaneous_course(course_request())
         self.assertIn("spontaneous course created.", "\n".join(logs.output))
         self.assertEqual(set(response), {
             "destinationId", "name", "transportMode", "returnTravelMinutes",
-            "estimatedReturnAt", "returnBy", "course",
+            "estimatedReturnAt", "returnBy", "course", "previewId", "previewToken",
+            "previewExpiresAt", "startLocation", "startAt", "finalTransit", "routeLines",
         })
+        database_connect.assert_not_called()
+        self.assertGreater(len(response["previewToken"]), 32)
+        self.assertEqual(response["startAt"], course_request().startAt)
+        self.assertTrue(response["routeLines"])
+        self.assertEqual(response["routeLines"][0]["coordinates"], [])
+        self.assertEqual(response["routeLines"][0]["instruction"], "")
+        self.assertIsNone(response["course"][0]["inboundTransit"]["segments"][0]["startStationName"])
+        self.assertIsNone(response["course"][0]["inboundTransit"]["fareAmount"])
         self.assertNotIn("failureReason", response)
         self.assertEqual(set(response["course"][0]), set(SpontaneousCourseResponse.model_validate(response).course[0].model_dump()))
 

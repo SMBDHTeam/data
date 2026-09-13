@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -768,31 +769,45 @@ def recommend_spontaneous_destinations(
         ),
     )
     if not results:
-        if "TMAP_QUOTA_EXCEEDED" in unavailable_reasons:
-            raise HTTPException(
-                status_code=503,
-                detail="TMAP_QUOTA_EXCEEDED",
-            )
+        failure_reason_counts = Counter(unavailable_reasons)
+        routing_candidate_count = len(routing_candidates)
 
-        if "ODSAY_QUOTA_EXCEEDED" in unavailable_reasons:
-            raise HTTPException(
-                status_code=503,
-                detail="ODSAY_QUOTA_EXCEEDED",
-            )
+        if failure_reason_counts["TMAP_QUOTA_EXCEEDED"]:
+            status_code, detail = 503, "TMAP_QUOTA_EXCEEDED"
+        elif failure_reason_counts["ODSAY_QUOTA_EXCEEDED"]:
+            status_code, detail = 503, "ODSAY_QUOTA_EXCEEDED"
+        elif failure_reason_counts["ODSAY_AUTH_FAILED"]:
+            status_code, detail = 503, "ODSAY_AUTH_FAILED"
+        elif failure_reason_counts["EXTERNAL_ROUTING_API_ERROR"]:
+            status_code, detail = 502, "EXTERNAL_ROUTING_API_ERROR"
+        elif routing_candidate_count == 0:
+            status_code, detail = 404, "SPONTANEOUS_DESTINATION_CANDIDATES_NOT_FOUND"
+        elif failure_reason_counts["NO_ROUTE"] == routing_candidate_count:
+            status_code, detail = 404, "SPONTANEOUS_DESTINATION_ROUTE_NOT_FOUND"
+        elif failure_reason_counts["INSUFFICIENT_STAY_TIME"] == routing_candidate_count:
+            status_code, detail = 404, "SPONTANEOUS_DESTINATION_TIME_TOO_SHORT"
+        elif (
+            failure_reason_counts["NO_ROUTE"] > 0
+            and failure_reason_counts["INSUFFICIENT_STAY_TIME"] > 0
+            and failure_reason_counts["NO_ROUTE"]
+            + failure_reason_counts["INSUFFICIENT_STAY_TIME"]
+            == routing_candidate_count
+        ):
+            status_code, detail = 404, "SPONTANEOUS_DESTINATION_TRANSPORT_CONSTRAINT"
+        else:
+            status_code, detail = 404, "DESTINATIONS_NOT_FOUND"
 
-        if "ODSAY_AUTH_FAILED" in unavailable_reasons:
-            raise HTTPException(
-                status_code=503,
-                detail="ODSAY_AUTH_FAILED",
-            )
-
-        if "EXTERNAL_ROUTING_API_ERROR" in unavailable_reasons:
-            raise HTTPException(
-                status_code=502,
-                detail="EXTERNAL_ROUTING_API_ERROR",
-            )
-
-        raise HTTPException(status_code=404, detail="DESTINATIONS_NOT_FOUND")
+        log.info(
+            "spontaneous destinations rejected. transportMode=%s "
+            "routingCandidateCount=%s successCandidateCount=%s "
+            "failureReasonCounts=%s errorCode=%s",
+            request.transportMode.value,
+            routing_candidate_count,
+            len(results),
+            dict(sorted(failure_reason_counts.items())),
+            detail,
+        )
+        raise HTTPException(status_code=status_code, detail=detail)
 
     return SpontaneousDestinationResponse(
         destinations=results[:recommendation_limit]

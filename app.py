@@ -86,6 +86,7 @@ from spontaneous.places import (
     search_places_by_zone,
     filter_course_candidates,
     convert_to_course_place,
+    enrich_course_place_images,
     is_course_place_open_for_visit,
 )
 
@@ -838,6 +839,7 @@ def create_spontaneous_course(
 
     before_count = len(places)
     detail_cache = {}
+    image_cache = {}
 
 
     # 2. 코스 가능한 장소만
@@ -1035,6 +1037,10 @@ def create_spontaneous_course(
         ]
 
         if estimated_return_at <= request.returnBy:
+            enrich_course_place_images(
+                timeline["course"],
+                image_cache=image_cache,
+            )
             log.info(
                 "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, "
                 "returnMinutes=%s, elapsedMs=%d, startAt=%s, timeProfile=%s",

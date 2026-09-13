@@ -5,12 +5,14 @@ from io import BytesIO
 from unittest import TestCase, main
 from unittest.mock import patch
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import HTTPException
 
 import app as data_app
 from spontaneous.models import SpontaneousCourseRequest, SpontaneousCourseResponse, TransportMode
 from spontaneous.places import infer_place_themes, is_open_now
+from spontaneous.preview import verify_preview_token
 from spontaneous.routing import route_result_from_minutes, search_route
 from tests.test_spontaneous_destination_routing_limit import START, START_AT
 from tests.test_spontaneous_destination_selection import TOURAPI_PLACES_BY_ZONE
@@ -43,16 +45,30 @@ def route_provider(mode, origin, destination, departure_at, cache=None):
 
 
 @contextmanager
-def provider_boundaries(places=None, opening_hours="11:00~18:00", provider=route_provider):
+def provider_boundaries(
+    places=None,
+    opening_hours="11:00~18:00",
+    provider=route_provider,
+    image_items=None,
+    image_error=None,
+):
     # Only external boundaries are replaced. Real TourAPI place records, course
     # generation, sequential timing, opening-hours parsing and cache run normally.
     detail = {"response": {"body": {"items": {"item": [{"opentimefood": opening_hours}]}}}}
+    images = {"response": {"body": {"items": {"item": image_items or []}}}}
+
+    def tour_api_response(url, *args, **kwargs):
+        if "/detailImage2" in url:
+            if image_error is not None:
+                raise image_error
+            return BytesIO(json.dumps(images).encode())
+        return BytesIO(json.dumps(detail).encode())
+
     with (
         patch("spontaneous.time_window.current_kst_time", return_value=START_AT),
         patch.dict("os.environ", {"TOUR_API_KEY": "test-key"}),
         patch("app.search_places_by_zone", return_value=[CAFE] if places is None else places),
-        patch("spontaneous.places.urlopen", side_effect=lambda *args, **kwargs:
-              BytesIO(json.dumps(detail).encode())) as detail_http,
+        patch("spontaneous.places.urlopen", side_effect=tour_api_response) as detail_http,
         patch("spontaneous.course.search_route", side_effect=provider) as routes,
     ):
         yield detail_http, routes
@@ -87,7 +103,11 @@ class SpontaneousCourseEndpointTest(TestCase):
         self.assertEqual(course.course[0].contentId, CAFE["contentid"])
         self.assertEqual(course.course[0].arrivalAt.hour, 13)
         self.assertEqual(course.course[0].departureAt.hour, 14)
-        self.assertEqual(detail_http.call_count, 1)
+        detail_intro_calls = [
+            call for call in detail_http.call_args_list
+            if "/detailIntro2" in call.args[0]
+        ]
+        self.assertEqual(len(detail_intro_calls), 1)
         self.assertEqual(routes.call_count, 2)
 
     def test_closed_at_arrival_or_departure_still_rejects_required_place(self):
@@ -118,10 +138,62 @@ class SpontaneousCourseEndpointTest(TestCase):
         self.assertNotIn("failureReason", response)
         self.assertEqual(set(response["course"][0]), set(SpontaneousCourseResponse.model_validate(response).course[0].model_dump()))
 
+    def test_selected_place_detail_image_is_in_response_and_signed_snapshot(self):
+        original = "https://tourapi.example/original.jpg"
+        with provider_boundaries(image_items=[{
+            "originimgurl": original,
+            "smallimageurl": "https://tourapi.example/thumbnail.jpg",
+        }]):
+            response = data_app.create_spontaneous_course(course_request())
+
+        self.assertEqual(response["course"][0]["place"]["primaryImageUrl"], original)
+        snapshot = verify_preview_token(
+            response["previewToken"],
+            response["previewId"],
+            None,
+        )
+        self.assertEqual(
+            snapshot["course"][0]["placeSnapshot"]["primaryImageUrl"],
+            original,
+        )
+
+    def test_detail_image_timeout_does_not_fail_course(self):
+        with provider_boundaries(image_error=TimeoutError("timed out")):
+            response = data_app.create_spontaneous_course(course_request())
+
+        self.assertIsNone(response["course"][0]["place"]["primaryImageUrl"])
+
+    def test_existing_location_images_are_unchanged_without_detail_image_call(self):
+        original = "https://tourapi.example/location-list.jpg"
+        for field in ("firstimage", "firstimage2"):
+            with self.subTest(field=field):
+                place = {**ACTIVITY, field: original}
+                with provider_boundaries(places=[place]) as (tour_api_http, _):
+                    response = data_app.create_spontaneous_course(
+                        course_request(themes=("SEA",))
+                    )
+
+                self.assertEqual(
+                    response["course"][0]["place"]["primaryImageUrl"],
+                    original,
+                )
+                self.assertFalse(any(
+                    "/detailImage2" in call.args[0]
+                    for call in tour_api_http.call_args_list
+                ))
+
     def test_closed_optional_cafe_is_removed_and_timeline_recalculated(self):
-        with provider_boundaries(places=[ACTIVITY, CAFE], opening_hours="00:00~01:00"):
+        with provider_boundaries(
+            places=[ACTIVITY, CAFE], opening_hours="00:00~01:00"
+        ) as (tour_api_http, _):
             response = data_app.create_spontaneous_course(course_request(themes=("SEA",)))
         self.assertEqual([stop["contentId"] for stop in response["course"]], [ACTIVITY["contentid"]])
+        image_content_ids = [
+            parse_qs(urlparse(call.args[0]).query)["contentId"][0]
+            for call in tour_api_http.call_args_list
+            if "/detailImage2" in call.args[0]
+        ]
+        self.assertEqual(image_content_ids, [ACTIVITY["contentid"]])
 
     def test_no_candidates_logs_filter_counts(self):
         with provider_boundaries(places=[LODGING]):

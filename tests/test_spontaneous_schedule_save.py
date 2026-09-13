@@ -8,7 +8,7 @@ from spontaneous.models import Coordinate, SpontaneousCourseRequest, TransportMo
 from spontaneous.preview import create_preview_token, verify_preview_token
 from spontaneous.schedule_service import schedule_from_snapshot, save_spontaneous_preview
 from schedule.models import ScheduleUpdateRequest
-from schedule.persistence import as_korea_offset
+from schedule.persistence import as_korea_offset, resolve_spontaneous_place
 from schedule.service import update_spontaneous_schedule
 from spontaneous.routing import RouteResult
 
@@ -142,6 +142,44 @@ class SpontaneousScheduleSaveTest(TestCase):
         self.assertIsNone(schedule.days[0].stops[0].fixed_starts_at)
         self.assertEqual(schedule.spontaneous_metadata["destinationId"], "BUSAN_GWANGALLI")
         self.assertEqual(places[0]["externalContentId"], "123")
+
+    def test_enriched_image_is_preserved_for_schedule_and_persistence(self):
+        value = snapshot()
+        expected = value["course"][0]["placeSnapshot"]["primaryImageUrl"]
+        preview_id, token, _ = create_preview_token(value, owner_id=7)
+        saved_schedule = object()
+
+        with (
+            mock.patch("spontaneous.schedule_service.db_enabled", return_value=True),
+            mock.patch(
+                "spontaneous.schedule_service.persist_spontaneous_schedule",
+                return_value=uuid4(),
+            ) as persist,
+            mock.patch(
+                "spontaneous.schedule_service.load_schedule",
+                return_value=saved_schedule,
+            ),
+        ):
+            result = save_spontaneous_preview(preview_id, token, 7, "image-save")
+
+        schedule_arg, snapshots_arg = persist.call_args.args[:2]
+        self.assertIs(result, saved_schedule)
+        self.assertEqual(schedule_arg.days[0].stops[0].place.primary_image_url, expected)
+        self.assertEqual(snapshots_arg[0]["primaryImageUrl"], expected)
+
+    def test_existing_tourapi_place_is_updated_with_enriched_image(self):
+        place_snapshot = snapshot()["course"][0]["placeSnapshot"]
+        expected = place_snapshot["primaryImageUrl"]
+        cursor = mock.Mock()
+        cursor.fetchone.return_value = {"id": 42, "hidden_at": None}
+
+        place_id = resolve_spontaneous_place(cursor, place_snapshot)
+
+        self.assertEqual(place_id, 42)
+        update_sql, parameters = cursor.execute.call_args_list[1].args
+        self.assertIn("UPDATE places", update_sql)
+        self.assertEqual(parameters[0], expected)
+        self.assertEqual(parameters[2], 42)
 
     def test_postgres_timestamps_are_returned_in_korea_calendar_zone(self):
         stored_utc = datetime(2026, 9, 11, 15, 5, tzinfo=timezone.utc)

@@ -97,7 +97,11 @@ def build_course_snapshot(request, destination, timeline: dict[str, Any]) -> dic
             "address": address,
             "longitude": stop.get("longitude"),
             "latitude": stop.get("latitude"),
-            "primaryImageUrl": raw.get("firstimage") or raw.get("firstimage2"),
+            "primaryImageUrl": (
+                raw.get("firstimage")
+                or raw.get("firstimage2")
+                or stop.get("_detailImageUrl")
+            ),
         }
         course.append(
             {

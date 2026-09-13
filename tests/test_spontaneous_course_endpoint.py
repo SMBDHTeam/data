@@ -139,14 +139,15 @@ class SpontaneousCourseEndpointTest(TestCase):
         self.assertEqual(set(response["course"][0]), set(SpontaneousCourseResponse.model_validate(response).course[0].model_dump()))
 
     def test_selected_place_detail_image_is_in_response_and_signed_snapshot(self):
-        original = "https://tourapi.example/original.jpg"
+        original = "http://tong.visitkorea.or.kr/cms/resource/original.jpg"
+        expected = "https://tong.visitkorea.or.kr/cms/resource/original.jpg"
         with provider_boundaries(image_items=[{
             "originimgurl": original,
             "smallimageurl": "https://tourapi.example/thumbnail.jpg",
         }]):
             response = data_app.create_spontaneous_course(course_request())
 
-        self.assertEqual(response["course"][0]["place"]["primaryImageUrl"], original)
+        self.assertEqual(response["course"][0]["place"]["primaryImageUrl"], expected)
         snapshot = verify_preview_token(
             response["previewToken"],
             response["previewId"],
@@ -154,7 +155,7 @@ class SpontaneousCourseEndpointTest(TestCase):
         )
         self.assertEqual(
             snapshot["course"][0]["placeSnapshot"]["primaryImageUrl"],
-            original,
+            expected,
         )
 
     def test_detail_image_timeout_does_not_fail_course(self):
@@ -163,8 +164,9 @@ class SpontaneousCourseEndpointTest(TestCase):
 
         self.assertIsNone(response["course"][0]["place"]["primaryImageUrl"])
 
-    def test_existing_location_images_are_unchanged_without_detail_image_call(self):
-        original = "https://tourapi.example/location-list.jpg"
+    def test_existing_location_images_are_normalized_without_detail_image_call(self):
+        original = "http://tong.visitkorea.or.kr/cms/resource/location-list.jpg"
+        expected = "https://tong.visitkorea.or.kr/cms/resource/location-list.jpg"
         for field in ("firstimage", "firstimage2"):
             with self.subTest(field=field):
                 place = {**ACTIVITY, field: original}
@@ -175,12 +177,18 @@ class SpontaneousCourseEndpointTest(TestCase):
 
                 self.assertEqual(
                     response["course"][0]["place"]["primaryImageUrl"],
-                    original,
+                    expected,
                 )
                 self.assertFalse(any(
                     "/detailImage2" in call.args[0]
                     for call in tour_api_http.call_args_list
                 ))
+
+    def test_place_without_image_remains_none(self):
+        with provider_boundaries(image_items=[]):
+            response = data_app.create_spontaneous_course(course_request())
+
+        self.assertIsNone(response["course"][0]["place"]["primaryImageUrl"])
 
     def test_closed_optional_cafe_is_removed_and_timeline_recalculated(self):
         with provider_boundaries(

@@ -21,6 +21,7 @@ from schedule.persistence import (
     load_schedule,
     save_spontaneous_schedule as persist_spontaneous_schedule,
 )
+from spontaneous.image_urls import normalize_tourapi_image_url
 from spontaneous.preview import preview_request_hash, verify_preview_token
 
 
@@ -76,6 +77,12 @@ def schedule_from_snapshot(
     place_snapshots: list[dict[str, Any]] = []
     for item in course:
         place_snapshot = _required_dict(item, "placeSnapshot")
+        place_snapshot = {
+            **place_snapshot,
+            "primaryImageUrl": normalize_tourapi_image_url(
+                place_snapshot.get("primaryImageUrl")
+            ),
+        }
         place_snapshots.append(place_snapshot)
         arrival_at = _offset_datetime(item.get("arrivalAt"))
         departure_at = _offset_datetime(item.get("departureAt"))

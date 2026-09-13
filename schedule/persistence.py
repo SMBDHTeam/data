@@ -14,6 +14,8 @@ from fastapi import HTTPException
 import psycopg
 from psycopg.rows import dict_row
 
+from spontaneous.image_urls import normalize_tourapi_image_url
+
 from schedule.models import (
     AppliedDefault,
     DayLocation,
@@ -506,6 +508,10 @@ def resolve_spontaneous_place(cur, snapshot: dict[str, Any]) -> int:
     except (KeyError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail="SPONTANEOUS_PREVIEW_INVALID") from exc
 
+    primary_image_url = normalize_tourapi_image_url(
+        snapshot.get("primaryImageUrl")
+    )
+
     cur.execute(
         """
         SELECT id, hidden_at FROM places
@@ -518,7 +524,6 @@ def resolve_spontaneous_place(cur, snapshot: dict[str, Any]) -> int:
     if existing is not None:
         if existing["hidden_at"] is not None:
             raise HTTPException(status_code=422, detail="SPONTANEOUS_PLACE_HIDDEN")
-        primary_image_url = snapshot.get("primaryImageUrl")
         if primary_image_url:
             cur.execute(
                 """
@@ -558,7 +563,7 @@ def resolve_spontaneous_place(cur, snapshot: dict[str, Any]) -> int:
             "address": address,
             "longitude": longitude,
             "latitude": latitude,
-            "primary_image_url": snapshot.get("primaryImageUrl"),
+            "primary_image_url": primary_image_url,
             "now": now,
         },
     )

@@ -1,11 +1,12 @@
 import json
 import os
 import re
+from datetime import datetime, time, timedelta, timezone
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
 from spontaneous.destinations import DestinationZone
-from datetime import datetime, time, timedelta, timezone
+from spontaneous.image_urls import normalize_tourapi_image_url
 
 KOREA_TIMEZONE = timezone(timedelta(hours=9))
 
@@ -424,17 +425,25 @@ def search_place_image(
 
             original_url = next(
                 (
-                    str(item.get("originimgurl") or "").strip()
+                    normalized
                     for item in items
-                    if str(item.get("originimgurl") or "").strip()
+                    if (
+                        normalized := normalize_tourapi_image_url(
+                            item.get("originimgurl")
+                        )
+                    )
                 ),
                 None,
             )
             thumbnail_url = next(
                 (
-                    str(item.get("smallimageurl") or "").strip()
+                    normalized
                     for item in items
-                    if str(item.get("smallimageurl") or "").strip()
+                    if (
+                        normalized := normalize_tourapi_image_url(
+                            item.get("smallimageurl")
+                        )
+                    )
                 ),
                 None,
             )
@@ -458,7 +467,13 @@ def enrich_course_place_images(
         raw = place.get("raw")
         if not isinstance(raw, dict):
             raw = {}
-        if raw.get("firstimage") or raw.get("firstimage2"):
+        has_list_image = False
+        for field in ("firstimage", "firstimage2"):
+            normalized = normalize_tourapi_image_url(raw.get(field))
+            if field in raw:
+                raw[field] = normalized
+            has_list_image = has_list_image or normalized is not None
+        if has_list_image:
             continue
 
         place["_detailImageUrl"] = search_place_image(

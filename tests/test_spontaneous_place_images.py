@@ -4,6 +4,7 @@ from unittest import TestCase, main
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
+from spontaneous.image_urls import normalize_tourapi_image_url
 from spontaneous.places import enrich_course_place_images, search_place_image
 
 
@@ -24,6 +25,28 @@ def selected_place(content_id="123", **raw_images):
 
 
 class SpontaneousPlaceImageTest(TestCase):
+    def test_list_image_fields_are_upgraded_to_https(self):
+        for field in ("firstimage", "firstimage2"):
+            with self.subTest(field=field):
+                place = selected_place(
+                    **{
+                        field: (
+                            "  http://tong.visitkorea.or.kr/cms/resource/44/"
+                            "2868344_image2_1.jpg?width=800&quality=90  "
+                        )
+                    }
+                )
+
+                with patch("spontaneous.places.search_place_image") as lookup:
+                    enrich_course_place_images([place], image_cache={})
+
+                lookup.assert_not_called()
+                self.assertEqual(
+                    place["raw"][field],
+                    "https://tong.visitkorea.or.kr/cms/resource/44/"
+                    "2868344_image2_1.jpg?width=800&quality=90",
+                )
+
     def test_firstimage_skips_detail_lookup(self):
         place = selected_place(firstimage="https://tourapi.example/first.jpg")
 
@@ -48,14 +71,19 @@ class SpontaneousPlaceImageTest(TestCase):
             patch("spontaneous.places.urlopen", return_value=image_response([
                 {"smallimageurl": "https://tourapi.example/first-thumb.jpg"},
                 {
-                    "originimgurl": "https://tourapi.example/original.jpg",
+                    "originimgurl": (
+                        "http://tong.visitkorea.or.kr/cms/resource/original.jpg"
+                    ),
                     "smallimageurl": "https://tourapi.example/second-thumb.jpg",
                 },
             ])) as tour_api_http,
         ):
             result = search_place_image("123", image_cache={})
 
-        self.assertEqual(result, "https://tourapi.example/original.jpg")
+        self.assertEqual(
+            result,
+            "https://tong.visitkorea.or.kr/cms/resource/original.jpg",
+        )
         params = parse_qs(urlparse(tour_api_http.call_args.args[0]).query)
         self.assertEqual(params["contentId"], ["123"])
         self.assertEqual(params["imageYN"], ["Y"])
@@ -66,8 +94,62 @@ class SpontaneousPlaceImageTest(TestCase):
         with (
             patch.dict("os.environ", {"TOUR_API_KEY": "test-key"}),
             patch("spontaneous.places.urlopen", return_value=image_response([
-                {"originimgurl": "", "smallimageurl": "https://tourapi.example/thumb.jpg"}
+                {
+                    "originimgurl": "",
+                    "smallimageurl": (
+                        "http://tong.visitkorea.or.kr/cms/resource/thumb.jpg"
+                    ),
+                }
             ])),
+        ):
+            result = search_place_image("123", image_cache={})
+
+        self.assertEqual(
+            result,
+            "https://tong.visitkorea.or.kr/cms/resource/thumb.jpg",
+        )
+
+    def test_https_url_is_unchanged(self):
+        value = "https://tong.visitkorea.or.kr/cms/resource/image.jpg?size=large"
+
+        self.assertEqual(normalize_tourapi_image_url(value), value)
+
+    def test_path_and_query_string_are_preserved_when_upgrading(self):
+        value = (
+            "http://tong.visitkorea.or.kr/cms/resource/a%20b/image.jpg"
+            "?name=a%2Fb&token=x%3Dy#preview"
+        )
+
+        self.assertEqual(
+            normalize_tourapi_image_url(value),
+            (
+                "https://tong.visitkorea.or.kr/cms/resource/a%20b/image.jpg"
+                "?name=a%2Fb&token=x%3Dy#preview"
+            ),
+        )
+
+    def test_empty_and_invalid_urls_are_none(self):
+        for value in (
+            None,
+            "",
+            "   ",
+            "not-a-url",
+            "ftp://tong.visitkorea.or.kr/image.jpg",
+            "http://example.test/image.jpg",
+            "https:///missing-host.jpg",
+            "https://user:password@example.test/image.jpg",
+            "https://example.test:invalid/image.jpg",
+        ):
+            with self.subTest(value=value):
+                self.assertIsNone(normalize_tourapi_image_url(value))
+
+    def test_invalid_original_falls_back_to_valid_thumbnail(self):
+        with (
+            patch.dict("os.environ", {"TOUR_API_KEY": "test-key"}),
+            patch("spontaneous.places.urlopen", return_value=image_response([{
+                "originimgurl": "javascript:alert(1)",
+                "smallimageurl": "https://tourapi.example/thumb.jpg",
+            }])),
         ):
             result = search_place_image("123", image_cache={})
 

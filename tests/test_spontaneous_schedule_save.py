@@ -90,7 +90,9 @@ def snapshot():
                 "address": "부산광역시",
                 "longitude": 129.12,
                 "latitude": 35.15,
-                "primaryImageUrl": "https://example.test/image.jpg",
+                "primaryImageUrl": (
+                    "http://tong.visitkorea.or.kr/cms/resource/image.jpg"
+                ),
             },
         }],
         "returnTravelMinutes": 35,
@@ -145,7 +147,7 @@ class SpontaneousScheduleSaveTest(TestCase):
 
     def test_enriched_image_is_preserved_for_schedule_and_persistence(self):
         value = snapshot()
-        expected = value["course"][0]["placeSnapshot"]["primaryImageUrl"]
+        expected = "https://tong.visitkorea.or.kr/cms/resource/image.jpg"
         preview_id, token, _ = create_preview_token(value, owner_id=7)
         saved_schedule = object()
 
@@ -166,10 +168,15 @@ class SpontaneousScheduleSaveTest(TestCase):
         self.assertIs(result, saved_schedule)
         self.assertEqual(schedule_arg.days[0].stops[0].place.primary_image_url, expected)
         self.assertEqual(snapshots_arg[0]["primaryImageUrl"], expected)
+        self.assertEqual(
+            schedule_arg.model_dump(by_alias=True)["days"][0]["stops"][0]
+            ["place"]["primaryImageUrl"],
+            expected,
+        )
 
     def test_existing_tourapi_place_is_updated_with_enriched_image(self):
         place_snapshot = snapshot()["course"][0]["placeSnapshot"]
-        expected = place_snapshot["primaryImageUrl"]
+        expected = "https://tong.visitkorea.or.kr/cms/resource/image.jpg"
         cursor = mock.Mock()
         cursor.fetchone.return_value = {"id": 42, "hidden_at": None}
 

@@ -13,6 +13,8 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
+from spontaneous.image_urls import normalize_tourapi_image_url
+
 
 log = logging.getLogger("data.spontaneous.preview")
 TOKEN_VERSION = "v1"
@@ -97,10 +99,17 @@ def build_course_snapshot(request, destination, timeline: dict[str, Any]) -> dic
             "address": address,
             "longitude": stop.get("longitude"),
             "latitude": stop.get("latitude"),
-            "primaryImageUrl": (
-                raw.get("firstimage")
-                or raw.get("firstimage2")
-                or stop.get("_detailImageUrl")
+            "primaryImageUrl": next(
+                (
+                    normalized
+                    for value in (
+                        raw.get("firstimage"),
+                        raw.get("firstimage2"),
+                        stop.get("_detailImageUrl"),
+                    )
+                    if (normalized := normalize_tourapi_image_url(value))
+                ),
+                None,
             ),
         }
         course.append(

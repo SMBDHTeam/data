@@ -12,6 +12,7 @@ KOREA_TIMEZONE = timezone(timedelta(hours=9))
 TOUR_API_BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
 TourApiPlacesCache = dict[str, list[dict]]
 TourApiDetailCache = dict[tuple[str, str], dict]
+TourApiImageCache = dict[str, str | None]
 SEAFOOD_MENU_KEYWORDS = [
     "회",
     "횟집",
@@ -366,6 +367,104 @@ def search_food_detail(
     if detail_cache is not None and cache_key is not None:
         detail_cache[cache_key] = detail
     return detail
+
+
+def search_place_image(
+    content_id: str | int | None,
+    image_cache: TourApiImageCache | None = None,
+) -> str | None:
+    """Return the best TourAPI detail image for one content ID."""
+    content_id_text = str(content_id or "").strip()
+    if not content_id_text:
+        return None
+
+    if image_cache is not None and content_id_text in image_cache:
+        return image_cache[content_id_text]
+
+    image_url = None
+    service_key = os.getenv("TOUR_API_KEY")
+    if service_key:
+        params = {
+            "serviceKey": service_key,
+            "MobileOS": "ETC",
+            "MobileApp": "BusanTour",
+            "_type": "json",
+            "contentId": content_id_text,
+            "imageYN": "Y",
+            "numOfRows": 10,
+            "pageNo": 1,
+        }
+        url = f"{TOUR_API_BASE_URL}/detailImage2?{urlencode(params)}"
+
+        try:
+            with urlopen(url, timeout=10) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+            header = data.get("response", {}).get("header", {})
+            result_code = str(header.get("resultCode") or "").strip()
+            if result_code and result_code not in {"00", "0000"}:
+                items = []
+            else:
+                item_container = (
+                    data.get("response", {})
+                    .get("body", {})
+                    .get("items")
+                )
+                raw_items = (
+                    item_container.get("item", [])
+                    if isinstance(item_container, dict)
+                    else []
+                )
+                if isinstance(raw_items, dict):
+                    items = [raw_items]
+                elif isinstance(raw_items, list):
+                    items = [item for item in raw_items if isinstance(item, dict)]
+                else:
+                    items = []
+
+            original_url = next(
+                (
+                    str(item.get("originimgurl") or "").strip()
+                    for item in items
+                    if str(item.get("originimgurl") or "").strip()
+                ),
+                None,
+            )
+            thumbnail_url = next(
+                (
+                    str(item.get("smallimageurl") or "").strip()
+                    for item in items
+                    if str(item.get("smallimageurl") or "").strip()
+                ),
+                None,
+            )
+            image_url = original_url or thumbnail_url
+        except Exception:
+            # Image enrichment is best-effort and must never fail course creation.
+            image_url = None
+
+    # Cache empty, invalid and failed results for the lifetime of this request too.
+    if image_cache is not None:
+        image_cache[content_id_text] = image_url
+    return image_url
+
+
+def enrich_course_place_images(
+    selected_places: list[dict],
+    image_cache: TourApiImageCache | None = None,
+) -> None:
+    """Enrich only selected places that lack both location-list image fields."""
+    for place in selected_places:
+        raw = place.get("raw")
+        if not isinstance(raw, dict):
+            raw = {}
+        if raw.get("firstimage") or raw.get("firstimage2"):
+            continue
+
+        place["_detailImageUrl"] = search_place_image(
+            place.get("contentId"),
+            image_cache=image_cache,
+        )
 
 
 def enrich_food_themes(

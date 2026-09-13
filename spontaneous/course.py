@@ -975,6 +975,7 @@ def build_course_stop(
             selected.get("contentTypeId")
             or selected.get("contenttypeid")
         ),
+        "raw": selected.get("raw") or selected,
         "stayMinutes": stay_minutes,
         "themes": sorted(
             get_place_themes(selected)

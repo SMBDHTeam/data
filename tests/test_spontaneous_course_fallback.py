@@ -86,7 +86,7 @@ def providers(places, hours=None, routing=None, now=START_AT):
         (round(float(item["mapy"]), 6), round(float(item["mapx"]), 6)): item["contentid"]
         for item in places
     }
-    calls = {"routes": [], "details": []}
+    calls = {"routes": [], "details": [], "images": []}
 
     def route(origin, destination, departure_at, cache=None):
         calls["routes"].append(route_cache_key(
@@ -104,6 +104,11 @@ def providers(places, hours=None, routing=None, now=START_AT):
 
     def detail(url, **kwargs):
         content_id = parse_qs(urlparse(url).query)["contentId"][0]
+        if "/detailImage2" in url:
+            calls["images"].append(content_id)
+            return BytesIO(json.dumps({
+                "response": {"body": {"items": {"item": []}}}
+            }).encode())
         calls["details"].append(content_id)
         item = {"opentimefood": hours.get(content_id, "00:00~23:59")}
         return BytesIO(json.dumps({"response": {"body": {"items": {"item": [item]}}}}).encode())

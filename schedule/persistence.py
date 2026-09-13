@@ -518,6 +518,16 @@ def resolve_spontaneous_place(cur, snapshot: dict[str, Any]) -> int:
     if existing is not None:
         if existing["hidden_at"] is not None:
             raise HTTPException(status_code=422, detail="SPONTANEOUS_PLACE_HIDDEN")
+        primary_image_url = snapshot.get("primaryImageUrl")
+        if primary_image_url:
+            cur.execute(
+                """
+                UPDATE places
+                SET primary_image_url = %s, updated_at = %s
+                WHERE id = %s
+                """,
+                (primary_image_url, datetime.now(), existing["id"]),
+            )
         return int(existing["id"])
 
     now = datetime.now()

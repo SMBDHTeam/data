@@ -174,6 +174,23 @@ class SpontaneousScheduleSaveTest(TestCase):
             expected,
         )
 
+    def test_related_hwangnyeong_image_is_preserved_in_saved_schedule_shape(self):
+        value = snapshot()
+        expected = (
+            "https://tong.visitkorea.or.kr/cms/resource/51/"
+            "2732751_image2_1.jpg"
+        )
+        value["course"][0]["placeSnapshot"]["primaryImageUrl"] = expected
+
+        schedule, place_snapshots = schedule_from_snapshot(value, uuid4())
+
+        self.assertEqual(
+            schedule.model_dump(by_alias=True)["days"][0]["stops"][0]
+            ["place"]["primaryImageUrl"],
+            expected,
+        )
+        self.assertEqual(place_snapshots[0]["primaryImageUrl"], expected)
+
     def test_existing_tourapi_place_is_updated_with_enriched_image(self):
         place_snapshot = snapshot()["course"][0]["placeSnapshot"]
         expected = "https://tong.visitkorea.or.kr/cms/resource/image.jpg"

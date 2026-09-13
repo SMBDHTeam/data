@@ -5,6 +5,7 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from math import isfinite
 
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -42,6 +43,7 @@ class RouteResult:
     mode: TransportMode
     provider: str
     legs: tuple["TransitLeg", ...] = ()
+    routeCoordinates: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,12 @@ class TransitRouteCandidate:
     totalSeconds: int
     legs: tuple[TransitLeg, ...]
     raw: dict
+
+
+@dataclass(frozen=True)
+class TmapCarRoute:
+    travelMinutes: int
+    coordinates: tuple[tuple[float, float], ...]
 
 
 @dataclass(frozen=True)
@@ -124,6 +132,7 @@ def route_result_from_minutes(
     provider: str,
     travel_minutes: int,
     departure_at: datetime,
+    route_coordinates: tuple[tuple[float, float], ...] = (),
 ) -> RouteResult:
     return RouteResult(
         travelMinutes=travel_minutes,
@@ -132,6 +141,7 @@ def route_result_from_minutes(
         arrivalAt=departure_at + timedelta(minutes=travel_minutes),
         mode=mode,
         provider=provider,
+        routeCoordinates=route_coordinates,
     )
 
 
@@ -1583,10 +1593,47 @@ def search_walking_minutes(
     return minutes
 
 
-def search_car_minutes(
+def tmap_line_string_coordinates(
+    features: list,
+) -> tuple[tuple[float, float], ...]:
+    coordinates: list[tuple[float, float]] = []
+
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        geometry = feature.get("geometry")
+        if not isinstance(geometry, dict) or geometry.get("type") != "LineString":
+            continue
+        raw_coordinates = geometry.get("coordinates")
+        if not isinstance(raw_coordinates, list):
+            continue
+
+        for value in raw_coordinates:
+            if not isinstance(value, list) or len(value) < 2:
+                continue
+            longitude = parse_optional_float(value[0])
+            latitude = parse_optional_float(value[1])
+            if (
+                longitude is None
+                or latitude is None
+                or not isfinite(longitude)
+                or not isfinite(latitude)
+                or not -180 <= longitude <= 180
+                or not -90 <= latitude <= 90
+            ):
+                continue
+            coordinate = (longitude, latitude)
+            if coordinates and coordinates[-1] == coordinate:
+                continue
+            coordinates.append(coordinate)
+
+    return tuple(coordinates)
+
+
+def search_tmap_car_route(
     origin: Coordinate,
     destination: Coordinate,
-) -> int | None:
+) -> TmapCarRoute | None:
     api_key = os.getenv("SKT_API_KEY", "").strip()
 
     if not api_key:
@@ -1662,11 +1709,24 @@ def search_car_minutes(
         1,
         (total_seconds + 59) // 60,
     )
+    coordinates = tmap_line_string_coordinates(features)
     log.info(
-        "routing provider=TMAP status=success mode=CAR minutes=%s",
+        "routing provider=TMAP status=success mode=CAR minutes=%s coordinateCount=%s",
         minutes,
+        len(coordinates),
     )
-    return minutes
+    return TmapCarRoute(
+        travelMinutes=minutes,
+        coordinates=coordinates,
+    )
+
+
+def search_car_minutes(
+    origin: Coordinate,
+    destination: Coordinate,
+) -> int | None:
+    route = search_tmap_car_route(origin, destination)
+    return route.travelMinutes if route is not None else None
 
 
 def search_travel_minutes(
@@ -1738,6 +1798,7 @@ def search_route(
         return cache[cache_key]
 
     provider = ""
+    route_coordinates: tuple[tuple[float, float], ...] = ()
 
     if mode == TransportMode.PUBLIC_TRANSIT:
         route = search_tmap_transit_route(
@@ -1757,10 +1818,12 @@ def search_route(
         )
     elif mode == TransportMode.CAR:
         provider = "TMAP"
-        minutes = search_car_minutes(
+        car_route = search_tmap_car_route(
             origin,
             destination,
         )
+        minutes = car_route.travelMinutes if car_route is not None else None
+        route_coordinates = car_route.coordinates if car_route is not None else ()
     else:
         minutes = None
 
@@ -1772,6 +1835,7 @@ def search_route(
             provider=provider,
             travel_minutes=minutes,
             departure_at=departure_at,
+            route_coordinates=route_coordinates,
         )
 
     if cache is not None:

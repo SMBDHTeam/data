@@ -1305,6 +1305,15 @@ def route_result_to_transit(
         else "UNAVAILABLE"
     )
     provider_legs = list(route.legs)
+    provider_coordinates = [
+        [longitude, latitude]
+        for longitude, latitude in route.routeCoordinates
+    ]
+    has_tmap_car_geometry = (
+        route.mode == TransportMode.CAR
+        and route.provider == "TMAP"
+        and len(provider_coordinates) >= 2
+    )
     legs = provider_legs or [
         TransitLeg(
             mode=route.mode.value,
@@ -1333,11 +1342,14 @@ def route_result_to_transit(
                 "realtimeStatus": realtime_status,
             }
         )
-        coordinates = []
-        if leg.startLongitude is not None and leg.startLatitude is not None:
-            coordinates.append([leg.startLongitude, leg.startLatitude])
-        if leg.endLongitude is not None and leg.endLatitude is not None:
-            coordinates.append([leg.endLongitude, leg.endLatitude])
+        if has_tmap_car_geometry and len(legs) == 1:
+            coordinates = provider_coordinates
+        else:
+            coordinates = []
+            if leg.startLongitude is not None and leg.startLatitude is not None:
+                coordinates.append([leg.startLongitude, leg.startLatitude])
+            if leg.endLongitude is not None and leg.endLatitude is not None:
+                coordinates.append([leg.endLongitude, leg.endLatitude])
         route_lines.append(
             {
                 "mode": leg.mode,
@@ -1347,7 +1359,7 @@ def route_result_to_transit(
                 "durationMinutes": leg.sectionTime,
                 "distanceMeters": None,
                 "instruction": "",
-                "fallbackUsed": True,
+                "fallbackUsed": not has_tmap_car_geometry,
                 "coordinates": coordinates,
             }
         )
@@ -1375,9 +1387,17 @@ def route_result_to_transit(
         "fareAmount": None,
         "provider": route.provider,
         "realtimeStatus": realtime_status,
-        "fallbackUsed": False,
+        "fallbackUsed": (
+            not has_tmap_car_geometry
+            if route.mode == TransportMode.CAR and route.provider == "TMAP"
+            else False
+        ),
         "segments": segments,
-        "warnings": ["제공사가 상세 경로 선형을 제공하지 않았습니다."],
+        "warnings": (
+            []
+            if has_tmap_car_geometry
+            else ["제공사가 상세 경로 선형을 제공하지 않았습니다."]
+        ),
         "route_lines": route_lines,
     }
 

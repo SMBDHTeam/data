@@ -193,7 +193,7 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
             ["ZONE_1"],
         )
 
-    def test_public_transit_two_no_routes_returns_not_found_without_third(self):
+    def test_public_transit_two_no_routes_returns_specific_reason_without_third(self):
         calls, fake_get_transport_option = self.get_transport_call_counter(
             {"ZONE_1": "NO_ROUTE", "ZONE_2": "NO_ROUTE"}
         )
@@ -207,7 +207,92 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
 
         self.assertEqual(calls, ["ZONE_1", "ZONE_2"])
         self.assertEqual(error.exception.status_code, 404)
-        self.assertEqual(error.exception.detail, "DESTINATIONS_NOT_FOUND")
+        self.assertEqual(
+            error.exception.detail,
+            "SPONTANEOUS_DESTINATION_ROUTE_NOT_FOUND",
+        )
+
+    def test_walk_all_no_routes_returns_specific_reason(self):
+        calls, fake_get_transport_option = self.get_transport_call_counter(
+            {zone.destination_id: "NO_ROUTE" for zone in self.zones}
+        )
+
+        with self.patch_preranking():
+            with patch("app.get_transport_option", side_effect=fake_get_transport_option):
+                with self.assertRaises(HTTPException) as error:
+                    data_app.recommend_spontaneous_destinations(
+                        request(TransportMode.WALK)
+                    )
+
+        self.assertEqual(len(calls), MAX_DESTINATION_RECOMMENDATIONS)
+        self.assertEqual(error.exception.status_code, 404)
+        self.assertEqual(
+            error.exception.detail,
+            "SPONTANEOUS_DESTINATION_ROUTE_NOT_FOUND",
+        )
+
+    def test_all_insufficient_stay_time_returns_specific_reason(self):
+        calls, fake_get_transport_option = self.get_transport_call_counter(
+            {
+                "ZONE_1": "INSUFFICIENT_STAY_TIME",
+                "ZONE_2": "INSUFFICIENT_STAY_TIME",
+            }
+        )
+
+        with self.patch_preranking():
+            with patch("app.get_transport_option", side_effect=fake_get_transport_option):
+                with self.assertRaises(HTTPException) as error:
+                    data_app.recommend_spontaneous_destinations(
+                        request(TransportMode.PUBLIC_TRANSIT)
+                    )
+
+        self.assertEqual(calls, ["ZONE_1", "ZONE_2"])
+        self.assertEqual(error.exception.status_code, 404)
+        self.assertEqual(
+            error.exception.detail,
+            "SPONTANEOUS_DESTINATION_TIME_TOO_SHORT",
+        )
+
+    def test_mixed_transport_constraints_return_specific_reason(self):
+        calls, fake_get_transport_option = self.get_transport_call_counter(
+            {
+                "ZONE_1": "NO_ROUTE",
+                "ZONE_2": "INSUFFICIENT_STAY_TIME",
+            }
+        )
+
+        with self.patch_preranking():
+            with patch("app.get_transport_option", side_effect=fake_get_transport_option):
+                with self.assertRaises(HTTPException) as error:
+                    data_app.recommend_spontaneous_destinations(
+                        request(TransportMode.PUBLIC_TRANSIT)
+                    )
+
+        self.assertEqual(calls, ["ZONE_1", "ZONE_2"])
+        self.assertEqual(error.exception.status_code, 404)
+        self.assertEqual(
+            error.exception.detail,
+            "SPONTANEOUS_DESTINATION_TRANSPORT_CONSTRAINT",
+        )
+
+    def test_no_routing_candidates_returns_place_or_theme_reason(self):
+        with patch.multiple(
+            data_app,
+            DESTINATION_ZONES=self.zones,
+            search_places_by_zone=lambda zone, places_cache=None: [],
+        ):
+            with patch("app.get_transport_option") as get_transport_option:
+                with self.assertRaises(HTTPException) as error:
+                    data_app.recommend_spontaneous_destinations(
+                        request(TransportMode.PUBLIC_TRANSIT)
+                    )
+
+        get_transport_option.assert_not_called()
+        self.assertEqual(error.exception.status_code, 404)
+        self.assertEqual(
+            error.exception.detail,
+            "SPONTANEOUS_DESTINATION_CANDIDATES_NOT_FOUND",
+        )
 
     def test_public_transit_provider_error_mapping_is_preserved(self):
         calls, fake_get_transport_option = self.get_transport_call_counter(
@@ -227,6 +312,51 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
         self.assertEqual(calls, ["ZONE_1", "ZONE_2"])
         self.assertEqual(error.exception.status_code, 502)
         self.assertEqual(error.exception.detail, "EXTERNAL_ROUTING_API_ERROR")
+
+    def test_tmap_quota_error_mapping_is_preserved(self):
+        calls, fake_get_transport_option = self.get_transport_call_counter(
+            {
+                "ZONE_1": "TMAP_QUOTA_EXCEEDED",
+                "ZONE_2": "NO_ROUTE",
+            }
+        )
+
+        with self.patch_preranking():
+            with patch("app.get_transport_option", side_effect=fake_get_transport_option):
+                with self.assertRaises(HTTPException) as error:
+                    data_app.recommend_spontaneous_destinations(
+                        request(TransportMode.PUBLIC_TRANSIT)
+                    )
+
+        self.assertEqual(calls, ["ZONE_1", "ZONE_2"])
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertEqual(error.exception.detail, "TMAP_QUOTA_EXCEEDED")
+
+    def test_failure_log_contains_only_aggregate_routing_context(self):
+        calls, fake_get_transport_option = self.get_transport_call_counter(
+            {"ZONE_1": "NO_ROUTE", "ZONE_2": "NO_ROUTE"}
+        )
+
+        with self.patch_preranking(), patch(
+            "app.get_transport_option", side_effect=fake_get_transport_option
+        ), self.assertLogs("data.app", level="INFO") as logs:
+            with self.assertRaises(HTTPException):
+                data_app.recommend_spontaneous_destinations(
+                    request(TransportMode.PUBLIC_TRANSIT)
+                )
+
+        failure_log = next(
+            message for message in logs.output
+            if "spontaneous destinations rejected" in message
+        )
+        self.assertEqual(calls, ["ZONE_1", "ZONE_2"])
+        self.assertIn("transportMode=PUBLIC_TRANSIT", failure_log)
+        self.assertIn("routingCandidateCount=2", failure_log)
+        self.assertIn("successCandidateCount=0", failure_log)
+        self.assertIn("failureReasonCounts={'NO_ROUTE': 2}", failure_log)
+        self.assertIn("errorCode=SPONTANEOUS_DESTINATION_ROUTE_NOT_FOUND", failure_log)
+        self.assertNotIn(str(START.latitude), failure_log)
+        self.assertNotIn(str(START.longitude), failure_log)
 
     def test_car_still_returns_existing_recommendation_limit(self):
         calls, fake_get_transport_option = self.get_transport_call_counter({})
@@ -373,7 +503,10 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
                         with self.assertRaises(HTTPException) as error:
                             data_app.recommend_spontaneous_destinations(payload)
                         self.assertEqual(error.exception.status_code, 404)
-                        self.assertEqual(error.exception.detail, "DESTINATIONS_NOT_FOUND")
+                        self.assertEqual(
+                            error.exception.detail,
+                            "SPONTANEOUS_DESTINATION_TIME_TOO_SHORT",
+                        )
                     else:
                         response = data_app.recommend_spontaneous_destinations(payload)
                         self.assertEqual(len(response.destinations), 2)

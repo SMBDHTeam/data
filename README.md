@@ -229,7 +229,11 @@ Spring 요청 DTO는 이미 `OffsetDateTime`을 사용한다. API 필드 구조�
 
 `POST /api/v1/spontaneous-trips/destinations`
 
-- `DESTINATIONS_NOT_FOUND`
+- `SPONTANEOUS_DESTINATION_ROUTE_NOT_FOUND`: 모든 라우팅 후보가 `NO_ROUTE`로 탈락
+- `SPONTANEOUS_DESTINATION_TIME_TOO_SHORT`: 모든 라우팅 후보가 최소 체류시간 부족으로 탈락
+- `SPONTANEOUS_DESTINATION_TRANSPORT_CONSTRAINT`: 경로 없음과 체류시간 부족이 함께 발생
+- `SPONTANEOUS_DESTINATION_CANDIDATES_NOT_FOUND`: 장소 또는 테마 조건을 만족하는 라우팅 후보가 없음
+- `DESTINATIONS_NOT_FOUND`: 분류되지 않은 기존 추천 실패
 
 ### 즉흥 코스
 

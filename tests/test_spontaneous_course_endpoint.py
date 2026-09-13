@@ -19,14 +19,19 @@ from tests.test_spontaneous_destination_selection import TOURAPI_PLACES_BY_ZONE
 
 
 PLACES = TOURAPI_PLACES_BY_ZONE["BUSAN_GWANGALLI"]
+HWANGNYEONG_PLACES = TOURAPI_PLACES_BY_ZONE["BUSAN_SEOMYEON"]
 CAFE = next(place for place in PLACES if "CAFE" in infer_place_themes(place))
 ACTIVITY = next(place for place in PLACES if "SEA" in infer_place_themes(place))
 LODGING = next(place for place in PLACES if place["contenttypeid"] == "32")
 
 
-def course_request(themes=("CAFE",), mode=TransportMode.CAR):
+def course_request(
+    themes=("CAFE",),
+    mode=TransportMode.CAR,
+    destination_id="BUSAN_GWANGALLI",
+):
     return SpontaneousCourseRequest(
-        destinationId="BUSAN_GWANGALLI",
+        destinationId=destination_id,
         startLocation=START,
         startAt=START_AT.replace(hour=10),
         returnBy=START_AT.replace(hour=18),
@@ -50,6 +55,7 @@ def provider_boundaries(
     opening_hours="11:00~18:00",
     provider=route_provider,
     image_items=None,
+    image_items_by_content_id=None,
     image_error=None,
 ):
     # Only external boundaries are replaced. Real TourAPI place records, course
@@ -61,6 +67,18 @@ def provider_boundaries(
         if "/detailImage2" in url:
             if image_error is not None:
                 raise image_error
+            if image_items_by_content_id is not None:
+                content_id = parse_qs(urlparse(url).query)["contentId"][0]
+                content_images = {
+                    "response": {
+                        "body": {
+                            "items": {
+                                "item": image_items_by_content_id.get(content_id, [])
+                            }
+                        }
+                    }
+                }
+                return BytesIO(json.dumps(content_images).encode())
             return BytesIO(json.dumps(images).encode())
         return BytesIO(json.dumps(detail).encode())
 
@@ -189,6 +207,63 @@ class SpontaneousCourseEndpointTest(TestCase):
             response = data_app.create_spontaneous_course(course_request())
 
         self.assertIsNone(response["course"][0]["place"]["primaryImageUrl"])
+
+    def test_hwangnyeong_lookout_uses_related_place_image_in_preview(self):
+        lookout = next(
+            place
+            for place in HWANGNYEONG_PLACES
+            if place["contentid"] == "2733472"
+        )
+        expected = (
+            "https://tong.visitkorea.or.kr/cms/resource/51/"
+            "2732751_image2_1.jpg"
+        )
+        selected_course = [{
+            "order": 1,
+            "role": "ACTIVITY",
+            "name": lookout["title"],
+            "contentId": lookout["contentid"],
+            "contentTypeId": lookout["contenttypeid"],
+            "latitude": float(lookout["mapy"]),
+            "longitude": float(lookout["mapx"]),
+            "raw": dict(lookout),
+            "stayMinutes": 60,
+            "themes": ["WALK"],
+            "score": 1.0,
+            "_required": True,
+            "_coveredThemes": ["WALK"],
+        }]
+        with provider_boundaries(
+            places=HWANGNYEONG_PLACES,
+            image_items_by_content_id={
+                "2733472": [],
+                "128290": [{"originimgurl": expected}],
+            },
+        ) as (tour_api_http, _), patch(
+            "app.generate_course", return_value=selected_course
+        ):
+            response = data_app.create_spontaneous_course(
+                course_request(
+                    themes=("WALK",),
+                    destination_id="BUSAN_SEOMYEON",
+                )
+            )
+
+        self.assertEqual(response["course"][0]["contentId"], "2733472")
+        self.assertEqual(response["course"][0]["place"]["primaryImageUrl"], expected)
+        snapshot = verify_preview_token(
+            response["previewToken"], response["previewId"], None
+        )
+        self.assertEqual(
+            snapshot["course"][0]["placeSnapshot"]["primaryImageUrl"],
+            expected,
+        )
+        image_content_ids = [
+            parse_qs(urlparse(call.args[0]).query)["contentId"][0]
+            for call in tour_api_http.call_args_list
+            if "/detailImage2" in call.args[0]
+        ]
+        self.assertEqual(image_content_ids, ["2733472", "128290"])
 
     def test_closed_optional_cafe_is_removed_and_timeline_recalculated(self):
         with provider_boundaries(

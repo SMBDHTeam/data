@@ -838,6 +838,7 @@ def create_spontaneous_course(
         ) from exc
 
     before_count = len(places)
+    regional_places = places
     detail_cache = {}
     image_cache = {}
 
@@ -1040,6 +1041,7 @@ def create_spontaneous_course(
             enrich_course_place_images(
                 timeline["course"],
                 image_cache=image_cache,
+                related_places=regional_places,
             )
             log.info(
                 "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, "

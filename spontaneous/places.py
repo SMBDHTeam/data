@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime, time, timedelta, timezone
+from math import asin, cos, radians, sin, sqrt
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -14,6 +16,14 @@ TOUR_API_BASE_URL = "https://apis.data.go.kr/B551011/KorService2"
 TourApiPlacesCache = dict[str, list[dict]]
 TourApiDetailCache = dict[tuple[str, str], dict]
 TourApiImageCache = dict[str, str | None]
+RELATED_PLACE_MAX_DISTANCE_METERS = 30.0
+MAX_DETAIL_IMAGE_LOOKUPS_PER_PLACE = 3
+MIN_RELATED_PLACE_NAME_LENGTH = 3
+RELATED_PLACE_NAME_SUFFIXES = (
+    "전망시설",
+    "전망대",
+    "관광지",
+)
 SEAFOOD_MENU_KEYWORDS = [
     "회",
     "횟집",
@@ -458,11 +468,192 @@ def search_place_image(
     return image_url
 
 
+def normalize_related_place_name(value) -> str:
+    """Normalize a TourAPI title without discarding branch descriptors."""
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return "".join(
+        character
+        for character in normalized
+        if not character.isspace()
+        and not unicodedata.category(character).startswith("P")
+    )
+
+
+def _place_record(place: dict) -> dict:
+    raw = place.get("raw")
+    return raw if isinstance(raw, dict) else place
+
+
+def _place_content_id(place: dict) -> str | None:
+    raw = _place_record(place)
+    value = place.get("contentId")
+    if value is None:
+        value = raw.get("contentid")
+    content_id = str(value or "").strip()
+    if (
+        not content_id.isdigit()
+        or len(content_id) > 255
+        or int(content_id) <= 0
+    ):
+        return None
+    return content_id
+
+
+def _place_content_type_id(place: dict) -> str | None:
+    raw = _place_record(place)
+    value = place.get("contentTypeId")
+    if value is None:
+        value = raw.get("contenttypeid")
+    content_type_id = str(value or "").strip()
+    return content_type_id or None
+
+
+def _place_coordinates(place: dict) -> tuple[float, float] | None:
+    raw = _place_record(place)
+    latitude_value = place.get("latitude")
+    longitude_value = place.get("longitude")
+    if latitude_value is None:
+        latitude_value = raw.get("mapy")
+    if longitude_value is None:
+        longitude_value = raw.get("mapx")
+    latitude = parse_optional_float(latitude_value)
+    longitude = parse_optional_float(longitude_value)
+    if (
+        latitude is None
+        or longitude is None
+        or not -90 <= latitude <= 90
+        or not -180 <= longitude <= 180
+    ):
+        return None
+    return latitude, longitude
+
+
+def _place_title(place: dict) -> str:
+    raw = _place_record(place)
+    return str(place.get("name") or raw.get("title") or "")
+
+
+def _name_parts(value) -> tuple[str, str]:
+    normalized = normalize_related_place_name(value)
+    core = normalized
+    for suffix in RELATED_PLACE_NAME_SUFFIXES:
+        if normalized.endswith(suffix):
+            core = normalized[:-len(suffix)]
+            break
+    return normalized, core
+
+
+def _related_name_rank(left, right) -> int | None:
+    left_name, left_core = _name_parts(left)
+    right_name, right_core = _name_parts(right)
+    if min(
+        sum(character.isalnum() for character in left_core),
+        sum(character.isalnum() for character in right_core),
+    ) < MIN_RELATED_PLACE_NAME_LENGTH:
+        return None
+    if left_name == right_name:
+        return 0
+    if left_core == right_core and (
+        left_name == right_core or right_name == left_core
+    ):
+        return 1
+    return None
+
+
+def _distance_meters(
+    left: tuple[float, float],
+    right: tuple[float, float],
+) -> float:
+    left_latitude, left_longitude = map(radians, left)
+    right_latitude, right_longitude = map(radians, right)
+    delta_latitude = right_latitude - left_latitude
+    delta_longitude = right_longitude - left_longitude
+    value = (
+        sin(delta_latitude / 2) ** 2
+        + cos(left_latitude)
+        * cos(right_latitude)
+        * sin(delta_longitude / 2) ** 2
+    )
+    return 6_371_000 * 2 * asin(sqrt(min(1.0, max(0.0, value))))
+
+
+def find_related_tourapi_places(
+    selected_place: dict,
+    candidate_places: list[dict],
+) -> list[dict]:
+    """Return strongly matching nearby records in deterministic preference order."""
+    selected_content_id = _place_content_id(selected_place)
+    selected_content_type_id = _place_content_type_id(selected_place)
+    selected_coordinates = _place_coordinates(selected_place)
+    if (
+        selected_content_id is None
+        or selected_content_type_id is None
+        or selected_coordinates is None
+    ):
+        return []
+
+    selected_record = _place_record(selected_place)
+    selected_category = str(selected_record.get("cat3") or "").strip()
+    ranked_by_content_id: dict[
+        str,
+        tuple[tuple[int, float, int], dict],
+    ] = {}
+    for candidate in candidate_places:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_content_id = _place_content_id(candidate)
+        if (
+            candidate_content_id is None
+            or candidate_content_id == selected_content_id
+        ):
+            continue
+        if _place_content_type_id(candidate) != selected_content_type_id:
+            continue
+
+        candidate_record = _place_record(candidate)
+        if selected_content_type_id == "39":
+            candidate_category = str(candidate_record.get("cat3") or "").strip()
+            if (
+                not selected_category
+                or not candidate_category
+                or candidate_category != selected_category
+            ):
+                continue
+
+        candidate_coordinates = _place_coordinates(candidate)
+        if candidate_coordinates is None:
+            continue
+        distance = _distance_meters(selected_coordinates, candidate_coordinates)
+        if distance > RELATED_PLACE_MAX_DISTANCE_METERS:
+            continue
+
+        name_rank = _related_name_rank(
+            _place_title(selected_place),
+            _place_title(candidate),
+        )
+        if name_rank is None:
+            continue
+
+        rank = (name_rank, distance, int(candidate_content_id))
+        previous = ranked_by_content_id.get(candidate_content_id)
+        if previous is None or rank < previous[0]:
+            ranked_by_content_id[candidate_content_id] = (rank, candidate_record)
+
+    return [
+        candidate
+        for _, candidate in sorted(
+            ranked_by_content_id.values(),
+            key=lambda item: item[0],
+        )
+    ]
+
+
 def enrich_course_place_images(
     selected_places: list[dict],
     image_cache: TourApiImageCache | None = None,
+    related_places: list[dict] | None = None,
 ) -> None:
-    """Enrich only selected places that lack both location-list image fields."""
+    """Enrich selected places with exact, then strongly related, TourAPI images."""
     for place in selected_places:
         raw = place.get("raw")
         if not isinstance(raw, dict):
@@ -476,10 +667,44 @@ def enrich_course_place_images(
         if has_list_image:
             continue
 
-        place["_detailImageUrl"] = search_place_image(
+        detail_image_url = search_place_image(
             place.get("contentId"),
             image_cache=image_cache,
         )
+        place["_detailImageUrl"] = detail_image_url
+        if detail_image_url is not None or not related_places:
+            continue
+
+        related_candidates = find_related_tourapi_places(place, related_places)
+        for field in ("firstimage", "firstimage2"):
+            related_image_url = next(
+                (
+                    normalized
+                    for candidate in related_candidates
+                    if (
+                        normalized := normalize_tourapi_image_url(
+                            candidate.get(field)
+                        )
+                    )
+                ),
+                None,
+            )
+            if related_image_url is not None:
+                place["_detailImageUrl"] = related_image_url
+                break
+        else:
+            remaining_detail_lookups = max(
+                0,
+                MAX_DETAIL_IMAGE_LOOKUPS_PER_PLACE - 1,
+            )
+            for candidate in related_candidates[:remaining_detail_lookups]:
+                related_image_url = search_place_image(
+                    candidate.get("contentid"),
+                    image_cache=image_cache,
+                )
+                if related_image_url is not None:
+                    place["_detailImageUrl"] = related_image_url
+                    break
 
 
 def enrich_food_themes(

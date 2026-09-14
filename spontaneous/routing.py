@@ -1676,13 +1676,147 @@ def tmap_optional_text(value) -> str | None:
     return normalized or None
 
 
+TMAP_NON_GUIDANCE_DESCRIPTIONS = {
+    "출발",
+    "출발지",
+    "도착",
+    "도착지",
+    "목적지",
+}
+
+
+def tmap_point_instruction(feature: dict) -> str | None:
+    geometry = feature.get("geometry")
+    if not isinstance(geometry, dict) or geometry.get("type") != "Point":
+        return None
+    properties = feature.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    instruction = tmap_optional_text(properties.get("description"))
+    if instruction is None:
+        return None
+    normalized = re.sub(r"[\s.,:;!?]+", "", instruction)
+    if normalized in TMAP_NON_GUIDANCE_DESCRIPTIONS:
+        return None
+    return instruction
+
+
+def tmap_step_group(instruction: str | None) -> dict:
+    return {
+        "instruction": instruction,
+        "line_names": [],
+        "coordinates": [],
+        "duration_seconds": 0,
+        "duration_complete": True,
+        "distance_meters": 0,
+        "distance_complete": True,
+    }
+
+
+def append_tmap_line_to_group(group: dict, feature: dict) -> None:
+    properties = feature.get("properties")
+    if not isinstance(properties, dict):
+        properties = {}
+
+    line_name = tmap_optional_text(properties.get("name"))
+    if line_name is not None and line_name not in group["line_names"]:
+        group["line_names"].append(line_name)
+
+    for coordinate in tmap_feature_coordinates(feature):
+        if group["coordinates"] and group["coordinates"][-1] == coordinate:
+            continue
+        group["coordinates"].append(coordinate)
+
+    step_seconds = tmap_nonnegative_int(properties.get("time"))
+    if step_seconds is None:
+        group["duration_complete"] = False
+    else:
+        group["duration_seconds"] += step_seconds
+
+    step_distance = tmap_nonnegative_int(properties.get("distance"))
+    if step_distance is None:
+        group["distance_complete"] = False
+    else:
+        group["distance_meters"] += step_distance
+
+
+def merge_tmap_step_groups(groups: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    for group in groups:
+        if (
+            merged
+            and group["instruction"] is not None
+            and group["instruction"] == merged[-1]["instruction"]
+            and group["line_names"] == merged[-1]["line_names"]
+        ):
+            previous = merged[-1]
+            for coordinate in group["coordinates"]:
+                if previous["coordinates"] and previous["coordinates"][-1] == coordinate:
+                    continue
+                previous["coordinates"].append(coordinate)
+            previous["duration_seconds"] += group["duration_seconds"]
+            previous["duration_complete"] = (
+                previous["duration_complete"] and group["duration_complete"]
+            )
+            previous["distance_meters"] += group["distance_meters"]
+            previous["distance_complete"] = (
+                previous["distance_complete"] and group["distance_complete"]
+            )
+            continue
+        merged.append(group)
+    return merged
+
+
+def allocate_tmap_step_minutes(
+    groups: list[dict],
+    total_minutes: int,
+) -> list[int | None]:
+    durations: list[int | None] = [None] * len(groups)
+    known = [
+        (index, group["duration_seconds"])
+        for index, group in enumerate(groups)
+        if group["duration_complete"]
+    ]
+    known_seconds = sum(seconds for _, seconds in known)
+    if not known:
+        return durations
+    if known_seconds <= 0:
+        for index, _ in known:
+            durations[index] = 0
+        return durations
+
+    target_minutes = min(
+        total_minutes,
+        (known_seconds + 59) // 60,
+    )
+    allocations = [
+        (seconds * target_minutes) // known_seconds
+        for _, seconds in known
+    ]
+    remainder_order = sorted(
+        range(len(known)),
+        key=lambda index: (
+            -((known[index][1] * target_minutes) % known_seconds),
+            known[index][0],
+        ),
+    )
+    for index in remainder_order[: target_minutes - sum(allocations)]:
+        allocations[index] += 1
+    for (group_index, _), minutes in zip(known, allocations):
+        durations[group_index] = minutes
+    return durations
+
+
 def tmap_route_from_features(
     features: list,
     mode: TransportMode,
 ) -> TmapRoute | None:
     total_seconds = None
     total_distance = None
-    steps: list[TmapRouteStep] = []
+    groups: list[dict] = []
+    current_group = None
+    pending_instruction = None
+    has_guidance = False
 
     for feature in features:
         if not isinstance(feature, dict):
@@ -1696,38 +1830,55 @@ def tmap_route_from_features(
         if total_distance is None:
             total_distance = tmap_nonnegative_int(properties.get("totalDistance"))
 
+        instruction = tmap_point_instruction(feature)
+        if instruction is not None:
+            has_guidance = True
+            if current_group is not None:
+                groups.append(current_group)
+                current_group = None
+            pending_instruction = instruction
+            continue
+
         coordinates = tmap_feature_coordinates(feature)
         if not coordinates:
             continue
-        line_name = tmap_optional_text(properties.get("name"))
-        instruction = tmap_optional_text(properties.get("description"))
-        step_seconds = tmap_nonnegative_int(properties.get("time"))
-        step_distance = tmap_nonnegative_int(properties.get("distance"))
-        if all(
-            value is None
-            for value in (line_name, instruction, step_seconds, step_distance)
-        ):
-            continue
-        steps.append(
-            TmapRouteStep(
-                mode=mode,
-                lineName=line_name,
-                instruction=instruction,
-                # Keep sub-minute steps at zero instead of rounding every step up.
-                durationMinutes=(
-                    step_seconds // 60 if step_seconds is not None else None
-                ),
-                distanceMeters=step_distance,
-                coordinates=coordinates,
-            )
-        )
+
+        if current_group is None:
+            current_group = tmap_step_group(pending_instruction)
+        append_tmap_line_to_group(current_group, feature)
+
+    if current_group is not None:
+        groups.append(current_group)
 
     if total_seconds is None:
         return None
+
+    travel_minutes = max(1, (total_seconds + 59) // 60)
+    groups = merge_tmap_step_groups(groups) if has_guidance else []
+    step_minutes = allocate_tmap_step_minutes(groups, travel_minutes)
+    steps = tuple(
+        TmapRouteStep(
+            mode=mode,
+            lineName=(
+                group["line_names"][0]
+                if len(group["line_names"]) == 1
+                else None
+            ),
+            instruction=group["instruction"],
+            durationMinutes=duration_minutes,
+            distanceMeters=(
+                group["distance_meters"]
+                if group["distance_complete"]
+                else None
+            ),
+            coordinates=tuple(group["coordinates"]),
+        )
+        for group, duration_minutes in zip(groups, step_minutes)
+    )
     return TmapRoute(
-        travelMinutes=max(1, (total_seconds + 59) // 60),
+        travelMinutes=travel_minutes,
         coordinates=tmap_line_string_coordinates(features),
-        steps=tuple(steps),
+        steps=steps,
         distanceMeters=total_distance,
     )
 

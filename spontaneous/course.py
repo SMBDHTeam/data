@@ -1327,26 +1327,26 @@ def route_result_to_transit(
     segments = []
     route_lines = []
 
-    if is_tmap_road_route and provider_steps:
-        for index, step in enumerate(provider_steps, start=1):
+    if is_tmap_road_route:
+        segments.append(
+            {
+                "order": 1,
+                "mode": route.mode.value,
+                "lineName": None,
+                "startStationId": None,
+                "startStationName": None,
+                "endStationId": None,
+                "endStationName": None,
+                "instruction": None,
+                "durationMinutes": route.travelMinutes,
+                "distanceMeters": route.totalDistanceMeters,
+                "stationCount": None,
+                "waitMinutes": wait_minutes,
+                "realtimeStatus": realtime_status,
+            }
+        )
+        for step in provider_steps:
             coordinates = [list(coordinate) for coordinate in step.coordinates]
-            segments.append(
-                {
-                    "order": index,
-                    "mode": step.mode.value,
-                    "lineName": step.lineName,
-                    "startStationId": None,
-                    "startStationName": None,
-                    "endStationId": None,
-                    "endStationName": None,
-                    "instruction": step.instruction,
-                    "durationMinutes": step.durationMinutes,
-                    "distanceMeters": step.distanceMeters,
-                    "stationCount": None,
-                    "waitMinutes": wait_minutes if index == 1 else 0,
-                    "realtimeStatus": realtime_status,
-                }
-            )
             route_lines.append(
                 {
                     "mode": step.mode.value,
@@ -1358,6 +1358,20 @@ def route_result_to_transit(
                     "instruction": step.instruction,
                     "fallbackUsed": len(coordinates) < 2,
                     "coordinates": coordinates,
+                }
+            )
+        if not route_lines:
+            route_lines.append(
+                {
+                    "mode": route.mode.value,
+                    "lineName": None,
+                    "startName": None,
+                    "endName": None,
+                    "durationMinutes": route.travelMinutes,
+                    "distanceMeters": route.totalDistanceMeters,
+                    "instruction": None,
+                    "fallbackUsed": not has_tmap_geometry,
+                    "coordinates": provider_coordinates if has_tmap_geometry else [],
                 }
             )
     else:
@@ -1374,22 +1388,17 @@ def route_result_to_transit(
                     "endStationName": leg.endName,
                     "instruction": "",
                     "durationMinutes": leg.sectionTime or 0,
-                    "distanceMeters": (
-                        route.totalDistanceMeters if is_tmap_road_route else None
-                    ),
+                    "distanceMeters": None,
                     "stationCount": len(station_ids) or None,
                     "waitMinutes": wait_minutes if index == 1 else 0,
                     "realtimeStatus": realtime_status,
                 }
             )
-            if has_tmap_geometry and len(legs) == 1:
-                coordinates = provider_coordinates
-            else:
-                coordinates = []
-                if leg.startLongitude is not None and leg.startLatitude is not None:
-                    coordinates.append([leg.startLongitude, leg.startLatitude])
-                if leg.endLongitude is not None and leg.endLatitude is not None:
-                    coordinates.append([leg.endLongitude, leg.endLatitude])
+            coordinates = []
+            if leg.startLongitude is not None and leg.startLatitude is not None:
+                coordinates.append([leg.startLongitude, leg.startLatitude])
+            if leg.endLongitude is not None and leg.endLatitude is not None:
+                coordinates.append([leg.endLongitude, leg.endLatitude])
             route_lines.append(
                 {
                     "mode": leg.mode,
@@ -1397,11 +1406,9 @@ def route_result_to_transit(
                     "startName": leg.startName,
                     "endName": leg.endName,
                     "durationMinutes": leg.sectionTime,
-                    "distanceMeters": (
-                        route.totalDistanceMeters if is_tmap_road_route else None
-                    ),
+                    "distanceMeters": None,
                     "instruction": "",
-                    "fallbackUsed": not has_tmap_geometry,
+                    "fallbackUsed": True,
                     "coordinates": coordinates,
                 }
             )

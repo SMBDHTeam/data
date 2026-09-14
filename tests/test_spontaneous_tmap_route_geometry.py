@@ -46,6 +46,10 @@ def tmap_guidance_features(
         "중앙대로를 따라 140m 이동",
         "해안로 방면으로 우회전 후 360m 이동",
     ),
+    line_descriptions: tuple[str, str] = (
+        "중앙대로, 140m",
+        "해안로, 360m",
+    ),
 ) -> list[dict]:
     return [
         {
@@ -74,7 +78,7 @@ def tmap_guidance_features(
             },
             "properties": {
                 "name": line_names[0],
-                "description": instructions[0],
+                "description": line_descriptions[0],
                 "time": 35,
                 "distance": 140,
             },
@@ -96,7 +100,7 @@ def tmap_guidance_features(
             },
             "properties": {
                 "name": line_names[1],
-                "description": instructions[1],
+                "description": line_descriptions[1],
                 "time": 91,
                 "distance": 360,
             },
@@ -187,7 +191,7 @@ class SpontaneousTmapRouteGeometryTest(TestCase):
             [step.instruction for step in route.routeSteps],
             ["중앙대로를 따라 140m 이동", "해안로 방면으로 우회전 후 360m 이동"],
         )
-        self.assertEqual([step.durationMinutes for step in route.routeSteps], [0, 1])
+        self.assertEqual([step.durationMinutes for step in route.routeSteps], [1, 2])
         self.assertEqual([step.distanceMeters for step in route.routeSteps], [140, 360])
         self.assertEqual(route.routeSteps[0].coordinates, ((129.04, 35.11), (129.08, 35.13)))
 
@@ -201,25 +205,40 @@ class SpontaneousTmapRouteGeometryTest(TestCase):
             route_type="INBOUND",
         )
         self.assertEqual(transit["totalMinutes"], 3)
-        self.assertLessEqual(
-            sum(segment["durationMinutes"] for segment in transit["segments"]),
-            transit["totalMinutes"],
+        self.assertEqual(len(transit["segments"]), 1)
+        self.assertEqual(
+            transit["segments"][0],
+            {
+                "order": 1,
+                "mode": "CAR",
+                "lineName": None,
+                "startStationId": None,
+                "startStationName": None,
+                "endStationId": None,
+                "endStationName": None,
+                "instruction": None,
+                "durationMinutes": 3,
+                "distanceMeters": 500,
+                "stationCount": None,
+                "waitMinutes": 0,
+                "realtimeStatus": "UNAVAILABLE",
+            },
         )
         self.assertEqual(
-            [segment["instruction"] for segment in transit["segments"]],
+            [line["instruction"] for line in transit["route_lines"]],
             ["중앙대로를 따라 140m 이동", "해안로 방면으로 우회전 후 360m 이동"],
         )
         self.assertEqual(
-            [segment["distanceMeters"] for segment in transit["segments"]],
+            [line["distanceMeters"] for line in transit["route_lines"]],
             [140, 360],
         )
         self.assertEqual(
-            [segment["startStationName"] for segment in transit["segments"]],
-            [None, None],
+            [line["lineName"] for line in transit["route_lines"]],
+            ["중앙대로", "해안로"],
         )
         self.assertEqual(
             [line["durationMinutes"] for line in transit["route_lines"]],
-            [0, 1],
+            [1, 2],
         )
         self.assertEqual(
             [line["coordinates"] for line in transit["route_lines"]],
@@ -230,6 +249,10 @@ class SpontaneousTmapRouteGeometryTest(TestCase):
         )
         self.assertFalse(transit["fallbackUsed"])
         self.assertEqual(transit["warnings"], [])
+        self.assertNotIn(
+            "중앙대로, 140m",
+            [line["instruction"] for line in transit["route_lines"]],
+        )
 
     def test_walking_guidance_keeps_provider_steps_and_geometry(self):
         features = tmap_guidance_features(
@@ -256,7 +279,7 @@ class SpontaneousTmapRouteGeometryTest(TestCase):
 
         self.assertIsNotNone(route)
         self.assertEqual([step.mode for step in route.routeSteps], [TransportMode.WALK] * 2)
-        self.assertEqual([step.durationMinutes for step in route.routeSteps], [0, 1])
+        self.assertEqual([step.durationMinutes for step in route.routeSteps], [1, 2])
         self.assertEqual(
             route.routeSteps[1].coordinates,
             ((129.08, 35.13), (129.12, 35.15)),
@@ -275,19 +298,20 @@ class SpontaneousTmapRouteGeometryTest(TestCase):
             route_type="INBOUND",
         )
         self.assertEqual(transit["walkMinutes"], transit["totalMinutes"])
-        self.assertEqual(
-            [segment["mode"] for segment in transit["segments"]],
-            ["WALK", "WALK"],
-        )
+        self.assertEqual(len(transit["segments"]), 1)
+        self.assertEqual(transit["segments"][0]["mode"], "WALK")
+        self.assertEqual(transit["segments"][0]["durationMinutes"], 3)
+        self.assertEqual(transit["segments"][0]["distanceMeters"], 500)
         self.assertEqual(
             [line["instruction"] for line in transit["route_lines"]],
             ["보행자도로를 따라 직진", "횡단보도를 건너 산책로로 이동"],
         )
         self.assertTrue(all(not line["fallbackUsed"] for line in transit["route_lines"]))
 
-    def test_missing_provider_guidance_and_distance_remain_empty(self):
+    def test_route_without_meaningful_point_guidance_keeps_only_aggregate_facts(self):
         features = tmap_guidance_features()
-        features[3]["properties"] = {"name": "이름만 제공된 도로"}
+        features[0]["properties"]["description"] = "출발지"
+        features[2]["properties"]["description"] = "목적지"
 
         with (
             mock.patch.dict("os.environ", {"SKT_API_KEY": "test-key"}),
@@ -304,9 +328,7 @@ class SpontaneousTmapRouteGeometryTest(TestCase):
             )
 
         self.assertIsNotNone(route)
-        self.assertIsNone(route.routeSteps[1].instruction)
-        self.assertIsNone(route.routeSteps[1].durationMinutes)
-        self.assertIsNone(route.routeSteps[1].distanceMeters)
+        self.assertEqual(route.routeSteps, ())
         transit = route_result_to_transit(
             route,
             "부산역",
@@ -316,13 +338,133 @@ class SpontaneousTmapRouteGeometryTest(TestCase):
             route_order=1,
             route_type="INBOUND",
         )
-        self.assertIsNone(transit["segments"][1]["instruction"])
-        self.assertIsNone(transit["segments"][1]["durationMinutes"])
-        self.assertIsNone(transit["segments"][1]["distanceMeters"])
-        self.assertIsNone(transit["route_lines"][1]["durationMinutes"])
-        self.assertIsNone(transit["route_lines"][1]["distanceMeters"])
+        self.assertEqual(len(transit["segments"]), 1)
+        self.assertEqual(len(transit["route_lines"]), 1)
+        self.assertIsNone(transit["segments"][0]["instruction"])
+        self.assertIsNone(transit["segments"][0]["lineName"])
+        self.assertEqual(transit["segments"][0]["durationMinutes"], 3)
+        self.assertEqual(transit["segments"][0]["distanceMeters"], 500)
+        self.assertIsNone(transit["route_lines"][0]["instruction"])
+        self.assertEqual(transit["route_lines"][0]["durationMinutes"], 3)
+        self.assertEqual(transit["route_lines"][0]["distanceMeters"], 500)
+        self.assertEqual(
+            transit["route_lines"][0]["coordinates"],
+            [[129.04, 35.11], [129.08, 35.13], [129.12, 35.15]],
+        )
         validated = ScheduleTransit.model_validate(transit)
-        self.assertIsNone(validated.segments[1].duration_minutes)
+        self.assertEqual(validated.segments[0].duration_minutes, 3)
+
+    def test_repeated_guidance_and_many_small_lines_are_grouped(self):
+        coordinates = [
+            (129.04 + index * 0.0001, 35.11 + index * 0.0001)
+            for index in range(21)
+        ]
+        features = [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": list(coordinates[0])},
+                "properties": {
+                    "totalTime": 100,
+                    "totalDistance": 60,
+                    "description": "황령산로를 따라 이동",
+                    "pointType": "S",
+                },
+            }
+        ]
+        for index in range(20):
+            if index == 10:
+                features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": list(coordinates[index]),
+                        },
+                        "properties": {
+                            "description": "황령산로를 따라 이동",
+                            "pointType": "N",
+                        },
+                    }
+                )
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            list(coordinates[index]),
+                            list(coordinates[index + 1]),
+                        ],
+                    },
+                    "properties": {
+                        "name": "황령산로",
+                        "description": "황령산로, 3m",
+                        "time": 5,
+                        "distance": 3,
+                    },
+                }
+            )
+
+        with (
+            mock.patch.dict("os.environ", {"SKT_API_KEY": "test-key"}),
+            mock.patch(
+                "spontaneous.routing.urlopen",
+                return_value=tmap_response(features),
+            ),
+        ):
+            route = search_route(
+                TransportMode.CAR,
+                ORIGIN,
+                DESTINATION,
+                datetime(2026, 9, 11, 12, 0, tzinfo=KST),
+            )
+
+        self.assertIsNotNone(route)
+        self.assertEqual(len(route.routeSteps), 1)
+        self.assertEqual(route.routeSteps[0].lineName, "황령산로")
+        self.assertEqual(route.routeSteps[0].instruction, "황령산로를 따라 이동")
+        self.assertEqual(route.routeSteps[0].durationMinutes, 2)
+        self.assertEqual(route.routeSteps[0].distanceMeters, 60)
+        self.assertEqual(route.routeSteps[0].coordinates, tuple(coordinates))
+
+        transit = route_result_to_transit(
+            route,
+            "부산역",
+            "해변",
+            ORIGIN,
+            DESTINATION,
+            route_order=1,
+            route_type="INBOUND",
+        )
+        self.assertEqual(len(transit["segments"]), 1)
+        self.assertEqual(len(transit["route_lines"]), 1)
+        self.assertEqual(transit["segments"][0]["distanceMeters"], 60)
+        self.assertEqual(transit["route_lines"][0]["distanceMeters"], 60)
+
+    def test_subminute_guidance_is_not_rounded_up_per_step(self):
+        features = tmap_guidance_features(total_time=2)
+        features[1]["properties"]["time"] = 1
+        features[3]["properties"]["time"] = 1
+
+        with (
+            mock.patch.dict("os.environ", {"SKT_API_KEY": "test-key"}),
+            mock.patch(
+                "spontaneous.routing.urlopen",
+                return_value=tmap_response(features),
+            ),
+        ):
+            route = search_route(
+                TransportMode.CAR,
+                ORIGIN,
+                DESTINATION,
+                datetime(2026, 9, 11, 12, 0, tzinfo=KST),
+            )
+
+        self.assertIsNotNone(route)
+        durations = [step.durationMinutes for step in route.routeSteps]
+        self.assertEqual(sum(durations), route.travelMinutes)
+        self.assertEqual(route.travelMinutes, 1)
+        self.assertIn(0, durations)
 
     def test_inbound_and_final_guidance_survive_preview_snapshot_across_midnight(self):
         start_at = datetime(2026, 9, 11, 23, 58, tzinfo=KST)
@@ -385,12 +527,18 @@ class SpontaneousTmapRouteGeometryTest(TestCase):
         public_lines = public_preview_route_lines(verified)
 
         self.assertEqual(verified, value)
+        self.assertEqual(len(public_course[0]["inboundTransit"]["segments"]), 1)
+        self.assertEqual(len(verified["finalTransit"]["segments"]), 1)
+        self.assertIsNone(
+            public_course[0]["inboundTransit"]["segments"][0]["instruction"]
+        )
+        self.assertIsNone(verified["finalTransit"]["segments"][0]["instruction"])
         self.assertEqual(
-            public_course[0]["inboundTransit"]["segments"][0]["instruction"],
+            public_lines[0]["instruction"],
             "중앙대로를 따라 140m 이동",
         )
         self.assertEqual(
-            verified["finalTransit"]["segments"][0]["instruction"],
+            public_lines[2]["instruction"],
             "해안로를 따라 복귀",
         )
         self.assertEqual([line["routeOrder"] for line in public_lines], [1, 1, 2, 2])
@@ -741,27 +889,39 @@ class SpontaneousTmapRouteGeometryTest(TestCase):
                 for call in cursor.execute.call_args_list
                 if "INSERT INTO transit_route_lines" in call.args[0]
             ]
-            self.assertEqual(len(segment_calls), 2)
+            self.assertEqual(len(segment_calls), 1)
             self.assertEqual(len(line_calls), 2)
-            self.assertEqual(segment_calls[0].args[1]["instruction"], transit.segments[0].instruction)
-            self.assertEqual(segment_calls[0].args[1]["distance_meters"], 140)
+            self.assertIsNone(segment_calls[0].args[1]["instruction"])
+            self.assertEqual(segment_calls[0].args[1]["duration_minutes"], 35)
+            self.assertEqual(segment_calls[0].args[1]["distance_meters"], 500)
             self.assertEqual(
                 json.loads(line_calls[0].args[1]["coordinates_json"]),
                 transit.route_lines[0]["coordinates"],
             )
-            self.assertEqual(line_calls[1].args[1]["instruction"], transit.segments[1].instruction)
+            self.assertEqual(
+                line_calls[0].args[1]["instruction"],
+                transit.route_lines[0]["instruction"],
+            )
+            self.assertEqual(
+                line_calls[1].args[1]["instruction"],
+                transit.route_lines[1]["instruction"],
+            )
             loaded_transits.append(route_to_model(persisted_route_row(transit)))
 
         day.stops[0].inbound_transit = loaded_transits[0]
         day.final_transit = loaded_transits[1]
         detail = schedule.model_dump(mode="json", by_alias=True)
         self.assertEqual(
-            detail["days"][0]["stops"][0]["inboundTransit"]["segments"][0]["instruction"],
-            "중앙대로를 따라 이동",
+            len(detail["days"][0]["stops"][0]["inboundTransit"]["segments"]),
+            1,
         )
         self.assertEqual(
-            detail["days"][0]["finalTransit"]["segments"][1]["distanceMeters"],
-            360,
+            detail["days"][0]["stops"][0]["inboundTransit"]["segments"][0]["instruction"],
+            None,
+        )
+        self.assertEqual(
+            detail["days"][0]["finalTransit"]["segments"][0]["distanceMeters"],
+            500,
         )
 
         with mock.patch("schedule.service.get_schedule", return_value=schedule):

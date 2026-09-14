@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -79,7 +80,34 @@ STYLE_SUMMARY_LABELS = {
     "THEME_SHOPPING": "쇼핑",
     "THEME_HEALING": "힐링",
     "THEME_SEA": "바다",
+    # 질문에서 내린 답변이다. 새 일정에는 들어오지 않지만 예전에 저장된 요약에는 남아 있다.
+    # 여기서 빠지면 그 요약이 내부 코드 그대로 화면에 나간다.
+    "PACE_BALANCED": "적당한 일정",
+    "PACE_ACTIVE": "부지런한 일정",
+    "THEME_LOCAL": "로컬",
+    "THEME_NIGHT_VIEW": "야경",
+    "THEME_EVENT": "축제",
+    "MOBILITY_OK_HILLS": "언덕 괜찮음",
+    "TRANSIT_TRANSFER_OK": "환승 괜찮음",
 }
+
+# 즉흥여행 요약 끝에 붙는 테마. 화면의 조건 선택지와 같은 이름을 쓴다.
+SPONTANEOUS_THEME_LABELS = {
+    "SEA": "바다",
+    "SEAFOOD": "해산물",
+    "FOOD": "음식",
+    "CAFE": "카페",
+    "WALK": "산책",
+    "NIGHT_VIEW": "야경",
+    "CULTURE": "문화",
+    "SHOPPING": "쇼핑",
+    "HEALING": "힐링",
+    "NATURE": "자연",
+    "ACTIVITY": "액티비티",
+}
+
+SPONTANEOUS_SUMMARY_PREFIX = "즉흥여행"
+SUMMARY_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_]*")
 
 
 def resolve_db_dsn() -> tuple[str | None, str | None, str | None]:
@@ -118,20 +146,59 @@ def normalize_style_summary(raw_summary: str | None) -> str:
     summary = (raw_summary or "").strip()
     if not summary:
         return "추천 일정"
+    if summary.startswith(SPONTANEOUS_SUMMARY_PREFIX):
+        return _normalize_spontaneous_summary(summary)
 
-    answer_ids = [token.strip() for token in summary.split(" / ") if token.strip()]
-    if not answer_ids or not all(answer_id in STYLE_SUMMARY_LABELS for answer_id in answer_ids):
+    answer_ids = _answer_ids_from_summary(summary)
+    if answer_ids is None:
         return summary
 
-    labeled_answers = [(answer_id, STYLE_SUMMARY_LABELS[answer_id]) for answer_id in answer_ids]
-    themes = [label for answer_id, label in labeled_answers if answer_id.startswith("THEME_")]
-    paces = [label for answer_id, label in labeled_answers if answer_id.startswith("PACE_")]
-    companions = [label for answer_id, label in labeled_answers if answer_id.startswith("COMPANION_")]
-    mobility_or_transit = [
-        label
-        for answer_id, label in labeled_answers
-        if answer_id.startswith(("MOBILITY_", "TRANSIT_"))
+    # 모르는 코드가 하나 섞였다고 요약 전체를 원문으로 돌려주면 코드가 그대로 노출된다.
+    # 아는 것만으로 문장을 만든다.
+    labeled_answers = [
+        (answer_id, STYLE_SUMMARY_LABELS[answer_id])
+        for answer_id in answer_ids
+        if answer_id in STYLE_SUMMARY_LABELS
     ]
+    if not labeled_answers:
+        return "추천 일정"
+    return _compose_style_summary(labeled_answers)
+
+
+def _answer_ids_from_summary(summary: str) -> list[str] | None:
+    """저장된 요약이 답변 코드 나열이면 코드 목록을, 이미 문장이면 None 을 준다.
+
+    예전에 저장된 요약은 두 형식이 섞여 있다.
+      "COMPANION_FRIENDS / PACE_RELAXED / THEME_FOOD"
+      "COMPANION:COMPANION_FRIENDS, PACE:PACE_RELAXED, THEME:THEME_FOOD"
+    """
+    tokens = summary.split(" / ") if " / " in summary else summary.split(",")
+    answer_ids = []
+    for token in tokens:
+        value = token.strip()
+        if ":" in value:
+            value = value.split(":", 1)[1].strip()
+        if not value:
+            continue
+        if not SUMMARY_CODE_PATTERN.fullmatch(value):
+            return None
+        answer_ids.append(value)
+    return answer_ids or None
+
+
+def _compose_style_summary(labeled_answers: list[tuple[str, str]]) -> str:
+    def labels_for(*prefixes: str) -> list[str]:
+        labels = []
+        for answer_id, label in labeled_answers:
+            # THEME_CULTURE 와 THEME_HISTORY_CULTURE 처럼 이름이 같은 답변이 함께 올 수 있다.
+            if answer_id.startswith(prefixes) and label not in labels:
+                labels.append(label)
+        return labels
+
+    themes = labels_for("THEME_")
+    paces = labels_for("PACE_")
+    companions = labels_for("COMPANION_")
+    mobility_or_transit = labels_for("MOBILITY_", "TRANSIT_")
 
     parts = []
     if companions:
@@ -146,6 +213,29 @@ def normalize_style_summary(raw_summary: str | None) -> str:
         parts.append(mobility_or_transit[0])
 
     return " ".join(parts[:3]) or "추천 일정"
+
+
+def spontaneous_theme_text(themes: list[str]) -> str:
+    """즉흥여행 테마 코드를 화면에 보일 이름으로 바꾼다. 모르는 코드는 뺀다."""
+    return ", ".join(
+        SPONTANEOUS_THEME_LABELS[theme] for theme in themes if theme in SPONTANEOUS_THEME_LABELS
+    )
+
+
+def _normalize_spontaneous_summary(summary: str) -> str:
+    """이미 저장된 즉흥여행 요약 끝의 테마 코드를 이름으로 바꾼다.
+
+    "즉흥여행 · 광안리·민락 · SHOPPING, CAFE" -> "즉흥여행 · 광안리·민락 · 쇼핑, 카페"
+    목적지 이름에도 가운뎃점이 들어가므로 앞뒤 공백이 있는 " · " 로만 나눈다.
+    """
+    head, separator, tail = summary.rpartition(" · ")
+    if not separator:
+        return summary
+    codes = [code.strip() for code in tail.split(",") if code.strip()]
+    if not codes or not all(SUMMARY_CODE_PATTERN.fullmatch(code) for code in codes):
+        return summary
+    theme_text = spontaneous_theme_text(codes)
+    return f"{head} · {theme_text}" if theme_text else head
 
 
 def normalize_transit_provider(provider: str | None) -> str | None:

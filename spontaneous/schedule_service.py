@@ -20,6 +20,7 @@ from schedule.persistence import (
     db_enabled,
     load_schedule,
     save_spontaneous_schedule as persist_spontaneous_schedule,
+    spontaneous_theme_text,
 )
 from spontaneous.image_urls import normalize_tourapi_image_url
 from spontaneous.preview import preview_request_hash, verify_preview_token
@@ -118,7 +119,8 @@ def schedule_from_snapshot(
     transport_mode = str(request["transportMode"])
     desired_themes = [str(value) for value in request.get("desiredThemes") or []]
     destination_name = str(destination["name"])
-    theme_text = ", ".join(desired_themes)
+    # 코드를 그대로 이어 붙이면 저장할 때마다 SHOPPING, CAFE 가 요약에 남아 화면에 나간다.
+    theme_text = spontaneous_theme_text(desired_themes)
     warnings = _dedupe(
         warning
         for transit in [*(stop.inbound_transit for stop in stops), final_transit]

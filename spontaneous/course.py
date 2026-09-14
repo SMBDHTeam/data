@@ -1305,13 +1305,17 @@ def route_result_to_transit(
         else "UNAVAILABLE"
     )
     provider_legs = list(route.legs)
+    provider_steps = list(route.routeSteps)
     provider_coordinates = [
         [longitude, latitude]
         for longitude, latitude in route.routeCoordinates
     ]
-    has_tmap_car_geometry = (
-        route.mode == TransportMode.CAR
+    is_tmap_road_route = (
+        route.mode in {TransportMode.CAR, TransportMode.WALK}
         and route.provider == "TMAP"
+    )
+    has_tmap_geometry = (
+        is_tmap_road_route
         and len(provider_coordinates) >= 2
     )
     legs = provider_legs or [
@@ -1323,49 +1327,89 @@ def route_result_to_transit(
     segments = []
     route_lines = []
 
-    for index, leg in enumerate(legs, start=1):
-        station_ids = list(leg.stationIds)
-        segments.append(
-            {
-                "order": index,
-                "mode": leg.mode,
-                "lineName": leg.route,
-                "startStationId": station_ids[0] if station_ids else None,
-                "startStationName": leg.startName,
-                "endStationId": station_ids[-1] if station_ids else None,
-                "endStationName": leg.endName,
-                "instruction": "",
-                "durationMinutes": leg.sectionTime or 0,
-                "distanceMeters": None,
-                "stationCount": len(station_ids) or None,
-                "waitMinutes": wait_minutes if index == 1 else 0,
-                "realtimeStatus": realtime_status,
-            }
-        )
-        if has_tmap_car_geometry and len(legs) == 1:
-            coordinates = provider_coordinates
-        else:
-            coordinates = []
-            if leg.startLongitude is not None and leg.startLatitude is not None:
-                coordinates.append([leg.startLongitude, leg.startLatitude])
-            if leg.endLongitude is not None and leg.endLatitude is not None:
-                coordinates.append([leg.endLongitude, leg.endLatitude])
-        route_lines.append(
-            {
-                "mode": leg.mode,
-                "lineName": leg.route,
-                "startName": leg.startName,
-                "endName": leg.endName,
-                "durationMinutes": leg.sectionTime,
-                "distanceMeters": None,
-                "instruction": "",
-                "fallbackUsed": not has_tmap_car_geometry,
-                "coordinates": coordinates,
-            }
-        )
+    if is_tmap_road_route and provider_steps:
+        for index, step in enumerate(provider_steps, start=1):
+            coordinates = [list(coordinate) for coordinate in step.coordinates]
+            segments.append(
+                {
+                    "order": index,
+                    "mode": step.mode.value,
+                    "lineName": step.lineName,
+                    "startStationId": None,
+                    "startStationName": None,
+                    "endStationId": None,
+                    "endStationName": None,
+                    "instruction": step.instruction,
+                    "durationMinutes": step.durationMinutes,
+                    "distanceMeters": step.distanceMeters,
+                    "stationCount": None,
+                    "waitMinutes": wait_minutes if index == 1 else 0,
+                    "realtimeStatus": realtime_status,
+                }
+            )
+            route_lines.append(
+                {
+                    "mode": step.mode.value,
+                    "lineName": step.lineName,
+                    "startName": None,
+                    "endName": None,
+                    "durationMinutes": step.durationMinutes,
+                    "distanceMeters": step.distanceMeters,
+                    "instruction": step.instruction,
+                    "fallbackUsed": len(coordinates) < 2,
+                    "coordinates": coordinates,
+                }
+            )
+    else:
+        for index, leg in enumerate(legs, start=1):
+            station_ids = list(leg.stationIds)
+            segments.append(
+                {
+                    "order": index,
+                    "mode": leg.mode,
+                    "lineName": leg.route,
+                    "startStationId": station_ids[0] if station_ids else None,
+                    "startStationName": leg.startName,
+                    "endStationId": station_ids[-1] if station_ids else None,
+                    "endStationName": leg.endName,
+                    "instruction": "",
+                    "durationMinutes": leg.sectionTime or 0,
+                    "distanceMeters": (
+                        route.totalDistanceMeters if is_tmap_road_route else None
+                    ),
+                    "stationCount": len(station_ids) or None,
+                    "waitMinutes": wait_minutes if index == 1 else 0,
+                    "realtimeStatus": realtime_status,
+                }
+            )
+            if has_tmap_geometry and len(legs) == 1:
+                coordinates = provider_coordinates
+            else:
+                coordinates = []
+                if leg.startLongitude is not None and leg.startLatitude is not None:
+                    coordinates.append([leg.startLongitude, leg.startLatitude])
+                if leg.endLongitude is not None and leg.endLatitude is not None:
+                    coordinates.append([leg.endLongitude, leg.endLatitude])
+            route_lines.append(
+                {
+                    "mode": leg.mode,
+                    "lineName": leg.route,
+                    "startName": leg.startName,
+                    "endName": leg.endName,
+                    "durationMinutes": leg.sectionTime,
+                    "distanceMeters": (
+                        route.totalDistanceMeters if is_tmap_road_route else None
+                    ),
+                    "instruction": "",
+                    "fallbackUsed": not has_tmap_geometry,
+                    "coordinates": coordinates,
+                }
+            )
 
-    walk_minutes = sum(
-        (leg.sectionTime or 0) for leg in legs if leg.mode.upper() == "WALK"
+    walk_minutes = (
+        route.travelMinutes
+        if route.mode == TransportMode.WALK
+        else sum((leg.sectionTime or 0) for leg in legs if leg.mode.upper() == "WALK")
     )
     return {
         "routeType": route_type,
@@ -1388,14 +1432,14 @@ def route_result_to_transit(
         "provider": route.provider,
         "realtimeStatus": realtime_status,
         "fallbackUsed": (
-            not has_tmap_car_geometry
-            if route.mode == TransportMode.CAR and route.provider == "TMAP"
+            not has_tmap_geometry
+            if is_tmap_road_route
             else False
         ),
         "segments": segments,
         "warnings": (
             []
-            if has_tmap_car_geometry
+            if has_tmap_geometry
             else ["제공사가 상세 경로 선형을 제공하지 않았습니다."]
         ),
         "route_lines": route_lines,

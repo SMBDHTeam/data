@@ -162,7 +162,7 @@ class ScheduleSegment(BaseModel):
     end_station_id: str | None = Field(default=None, alias="endStationId")
     end_station_name: str | None = Field(default=None, alias="endStationName")
     instruction: str | None = None
-    duration_minutes: int = Field(default=0, alias="durationMinutes")
+    duration_minutes: int | None = Field(default=None, alias="durationMinutes")
     distance_meters: int | None = Field(default=None, alias="distanceMeters")
     station_count: int | None = Field(default=None, alias="stationCount")
     wait_minutes: int = Field(default=0, alias="waitMinutes")

@@ -35,6 +35,16 @@ class RoutingApiError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class TmapRouteStep:
+    mode: TransportMode
+    lineName: str | None = None
+    instruction: str | None = None
+    durationMinutes: int | None = None
+    distanceMeters: int | None = None
+    coordinates: tuple[tuple[float, float], ...] = ()
+
+
+@dataclass(frozen=True)
 class RouteResult:
     travelMinutes: int
     requestedDepartureAt: datetime
@@ -44,6 +54,8 @@ class RouteResult:
     provider: str
     legs: tuple["TransitLeg", ...] = ()
     routeCoordinates: tuple[tuple[float, float], ...] = ()
+    routeSteps: tuple[TmapRouteStep, ...] = ()
+    totalDistanceMeters: int | None = None
 
 
 @dataclass(frozen=True)
@@ -70,9 +82,14 @@ class TransitRouteCandidate:
 
 
 @dataclass(frozen=True)
-class TmapCarRoute:
+class TmapRoute:
     travelMinutes: int
     coordinates: tuple[tuple[float, float], ...]
+    steps: tuple[TmapRouteStep, ...] = ()
+    distanceMeters: int | None = None
+
+
+TmapCarRoute = TmapRoute
 
 
 @dataclass(frozen=True)
@@ -133,6 +150,8 @@ def route_result_from_minutes(
     travel_minutes: int,
     departure_at: datetime,
     route_coordinates: tuple[tuple[float, float], ...] = (),
+    route_steps: tuple[TmapRouteStep, ...] = (),
+    total_distance_meters: int | None = None,
 ) -> RouteResult:
     return RouteResult(
         travelMinutes=travel_minutes,
@@ -142,6 +161,8 @@ def route_result_from_minutes(
         mode=mode,
         provider=provider,
         routeCoordinates=route_coordinates,
+        routeSteps=route_steps,
+        totalDistanceMeters=total_distance_meters,
     )
 
 
@@ -1503,10 +1524,10 @@ def search_public_transit_minutes(
 
 
 
-def search_walking_minutes(
+def search_tmap_walking_route(
     origin: Coordinate,
     destination: Coordinate,
-) -> int | None:
+) -> TmapRoute | None:
     enabled = os.getenv(
         "TMAP_WALKING_ENABLED",
         "false",
@@ -1535,6 +1556,8 @@ def search_walking_minutes(
         "endY": str(destination.latitude),
         "startName": "출발지",
         "endName": "목적지",
+        "reqCoordType": "WGS84GEO",
+        "resCoordType": "WGS84GEO",
     }
 
     request = Request(
@@ -1569,28 +1592,58 @@ def search_walking_minutes(
         log.info("routing provider=TMAP status=no_route mode=WALK")
         return None
 
-    total_seconds = None
-
-    for feature in features:
-        properties = feature.get("properties", {})
-
-        if "totalTime" in properties:
-            total_seconds = properties["totalTime"]
-            break
-
-    if not isinstance(total_seconds, int):
+    route = tmap_route_from_features(features, TransportMode.WALK)
+    if route is None:
         log.info("routing provider=TMAP status=no_route mode=WALK")
         return None
 
-    minutes = max(
-        1,
-        (total_seconds + 59) // 60,
-    )
     log.info(
-        "routing provider=TMAP status=success mode=WALK minutes=%s",
-        minutes,
+        "routing provider=TMAP status=success mode=WALK minutes=%s coordinateCount=%s stepCount=%s",
+        route.travelMinutes,
+        len(route.coordinates),
+        len(route.steps),
     )
-    return minutes
+    return route
+
+
+def search_walking_minutes(
+    origin: Coordinate,
+    destination: Coordinate,
+) -> int | None:
+    route = search_tmap_walking_route(origin, destination)
+    return route.travelMinutes if route is not None else None
+
+
+def tmap_feature_coordinates(
+    feature: dict,
+) -> tuple[tuple[float, float], ...]:
+    geometry = feature.get("geometry")
+    if not isinstance(geometry, dict) or geometry.get("type") != "LineString":
+        return ()
+    raw_coordinates = geometry.get("coordinates")
+    if not isinstance(raw_coordinates, list):
+        return ()
+
+    coordinates: list[tuple[float, float]] = []
+    for value in raw_coordinates:
+        if not isinstance(value, list) or len(value) < 2:
+            continue
+        longitude = parse_optional_float(value[0])
+        latitude = parse_optional_float(value[1])
+        if (
+            longitude is None
+            or latitude is None
+            or not isfinite(longitude)
+            or not isfinite(latitude)
+            or not -180 <= longitude <= 180
+            or not -90 <= latitude <= 90
+        ):
+            continue
+        coordinate = (longitude, latitude)
+        if coordinates and coordinates[-1] == coordinate:
+            continue
+        coordinates.append(coordinate)
+    return tuple(coordinates)
 
 
 def tmap_line_string_coordinates(
@@ -1601,28 +1654,7 @@ def tmap_line_string_coordinates(
     for feature in features:
         if not isinstance(feature, dict):
             continue
-        geometry = feature.get("geometry")
-        if not isinstance(geometry, dict) or geometry.get("type") != "LineString":
-            continue
-        raw_coordinates = geometry.get("coordinates")
-        if not isinstance(raw_coordinates, list):
-            continue
-
-        for value in raw_coordinates:
-            if not isinstance(value, list) or len(value) < 2:
-                continue
-            longitude = parse_optional_float(value[0])
-            latitude = parse_optional_float(value[1])
-            if (
-                longitude is None
-                or latitude is None
-                or not isfinite(longitude)
-                or not isfinite(latitude)
-                or not -180 <= longitude <= 180
-                or not -90 <= latitude <= 90
-            ):
-                continue
-            coordinate = (longitude, latitude)
+        for coordinate in tmap_feature_coordinates(feature):
             if coordinates and coordinates[-1] == coordinate:
                 continue
             coordinates.append(coordinate)
@@ -1630,10 +1662,80 @@ def tmap_line_string_coordinates(
     return tuple(coordinates)
 
 
+def tmap_nonnegative_int(value) -> int | None:
+    parsed = parse_optional_float(value)
+    if parsed is None or not isfinite(parsed) or parsed < 0:
+        return None
+    return int(parsed)
+
+
+def tmap_optional_text(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def tmap_route_from_features(
+    features: list,
+    mode: TransportMode,
+) -> TmapRoute | None:
+    total_seconds = None
+    total_distance = None
+    steps: list[TmapRouteStep] = []
+
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        properties = feature.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+
+        if total_seconds is None:
+            total_seconds = tmap_nonnegative_int(properties.get("totalTime"))
+        if total_distance is None:
+            total_distance = tmap_nonnegative_int(properties.get("totalDistance"))
+
+        coordinates = tmap_feature_coordinates(feature)
+        if not coordinates:
+            continue
+        line_name = tmap_optional_text(properties.get("name"))
+        instruction = tmap_optional_text(properties.get("description"))
+        step_seconds = tmap_nonnegative_int(properties.get("time"))
+        step_distance = tmap_nonnegative_int(properties.get("distance"))
+        if all(
+            value is None
+            for value in (line_name, instruction, step_seconds, step_distance)
+        ):
+            continue
+        steps.append(
+            TmapRouteStep(
+                mode=mode,
+                lineName=line_name,
+                instruction=instruction,
+                # Keep sub-minute steps at zero instead of rounding every step up.
+                durationMinutes=(
+                    step_seconds // 60 if step_seconds is not None else None
+                ),
+                distanceMeters=step_distance,
+                coordinates=coordinates,
+            )
+        )
+
+    if total_seconds is None:
+        return None
+    return TmapRoute(
+        travelMinutes=max(1, (total_seconds + 59) // 60),
+        coordinates=tmap_line_string_coordinates(features),
+        steps=tuple(steps),
+        distanceMeters=total_distance,
+    )
+
+
 def search_tmap_car_route(
     origin: Coordinate,
     destination: Coordinate,
-) -> TmapCarRoute | None:
+) -> TmapRoute | None:
     api_key = os.getenv("SKT_API_KEY", "").strip()
 
     if not api_key:
@@ -1691,34 +1793,18 @@ def search_tmap_car_route(
         log.info("routing provider=TMAP status=no_route mode=CAR")
         return None
 
-    total_seconds = None
-
-    for feature in features:
-        properties = feature.get("properties", {})
-
-        if "totalTime" in properties:
-            total_seconds = properties["totalTime"]
-            break
-
-    if not isinstance(total_seconds, int):
+    route = tmap_route_from_features(features, TransportMode.CAR)
+    if route is None:
         log.info("routing provider=TMAP status=no_route mode=CAR")
         return None
 
-
-    minutes = max(
-        1,
-        (total_seconds + 59) // 60,
-    )
-    coordinates = tmap_line_string_coordinates(features)
     log.info(
-        "routing provider=TMAP status=success mode=CAR minutes=%s coordinateCount=%s",
-        minutes,
-        len(coordinates),
+        "routing provider=TMAP status=success mode=CAR minutes=%s coordinateCount=%s stepCount=%s",
+        route.travelMinutes,
+        len(route.coordinates),
+        len(route.steps),
     )
-    return TmapCarRoute(
-        travelMinutes=minutes,
-        coordinates=coordinates,
-    )
+    return route
 
 
 def search_car_minutes(
@@ -1798,7 +1884,7 @@ def search_route(
         return cache[cache_key]
 
     provider = ""
-    route_coordinates: tuple[tuple[float, float], ...] = ()
+    tmap_route = None
 
     if mode == TransportMode.PUBLIC_TRANSIT:
         route = search_tmap_transit_route(
@@ -1812,18 +1898,18 @@ def search_route(
         return route
     elif mode == TransportMode.WALK:
         provider = "TMAP"
-        minutes = search_walking_minutes(
+        tmap_route = search_tmap_walking_route(
             origin,
             destination,
         )
+        minutes = tmap_route.travelMinutes if tmap_route is not None else None
     elif mode == TransportMode.CAR:
         provider = "TMAP"
-        car_route = search_tmap_car_route(
+        tmap_route = search_tmap_car_route(
             origin,
             destination,
         )
-        minutes = car_route.travelMinutes if car_route is not None else None
-        route_coordinates = car_route.coordinates if car_route is not None else ()
+        minutes = tmap_route.travelMinutes if tmap_route is not None else None
     else:
         minutes = None
 
@@ -1835,7 +1921,11 @@ def search_route(
             provider=provider,
             travel_minutes=minutes,
             departure_at=departure_at,
-            route_coordinates=route_coordinates,
+            route_coordinates=tmap_route.coordinates if tmap_route is not None else (),
+            route_steps=tmap_route.steps if tmap_route is not None else (),
+            total_distance_meters=(
+                tmap_route.distanceMeters if tmap_route is not None else None
+            ),
         )
 
     if cache is not None:

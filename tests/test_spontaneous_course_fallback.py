@@ -217,9 +217,59 @@ class SpontaneousCourseFallbackTest(TestCase):
     def test_all_five_required_cafes_closed_exhausts_candidates(self):
         places = [place(f"c{index}", rank=index) for index in range(1, 6)]
         with providers(places, hours={item["contentid"]: "00:00~01:00" for item in places}) as calls:
-            self.assertEqual(post_json(COURSE_URL, payload()), (422, {"detail": "COURSE_NOT_FEASIBLE"}))
+            self.assertEqual(post_json(COURSE_URL, payload()), (422, {"detail": "COURSE_PLACES_CLOSED"}))
         self.assertEqual(calls["timeline"].call_count, MAX_CANDIDATES_PER_ROLE)
         self.assertEqual(len(calls["details"]), 5)
+
+    def test_single_return_time_failure_reason_is_exposed_with_summary_log(self):
+        places = [place("c1"), place("c2", rank=2)]
+        with providers(
+            places,
+            routing=lambda origin, destination, time: 70,
+        ) as calls, self.assertLogs("data.app", level="INFO") as logs:
+            self.assertEqual(
+                post_json(COURSE_URL, payload(minutes=120)),
+                (422, {"detail": "COURSE_RETURN_TIME_EXCEEDED"}),
+            )
+
+        self.assertEqual(calls["timeline"].call_count, 2)
+        final_log = next(message for message in logs.output if "course search finished" in message)
+        self.assertIn("failureReason=COURSE_RETURN_TIME_EXCEEDED", final_log)
+        self.assertIn("attempts=2", final_log)
+        self.assertIn("failureReasonCounts={'RETURN_TIME_EXCEEDED': 2}", final_log)
+        self.assertIn("lastFailureReason=RETURN_TIME_EXCEEDED", final_log)
+        self.assertIn("transportMode=PUBLIC_TRANSIT", final_log)
+
+    def test_mixed_candidate_failure_reasons_keep_generic_detail(self):
+        places = [place("closed"), place("unroutable", rank=2)]
+
+        def routing(origin, destination, time):
+            return None if destination == "unroutable" else 10
+
+        with providers(
+            places,
+            hours={"closed": "00:00~01:00"},
+            routing=routing,
+        ) as calls, self.assertLogs("data.app", level="INFO") as logs:
+            self.assertEqual(
+                post_json(COURSE_URL, payload()),
+                (422, {"detail": "COURSE_NOT_FEASIBLE"}),
+            )
+
+        self.assertEqual(calls["timeline"].call_count, 2)
+        final_log = next(message for message in logs.output if "course search finished" in message)
+        self.assertIn("failureReason=COURSE_NOT_FEASIBLE", final_log)
+        self.assertIn("'NO_ROUTE': 1", final_log)
+        self.assertIn("'PLACE_CLOSED_AT_VISIT_TIME': 1", final_log)
+
+    def test_all_candidate_routes_missing_preserves_no_route_detail(self):
+        places = [place("c1"), place("c2", rank=2)]
+        with providers(places, routing=lambda origin, destination, time: None) as calls:
+            self.assertEqual(
+                post_json(COURSE_URL, payload()),
+                (422, {"detail": "NO_ROUTE"}),
+            )
+        self.assertEqual(calls["timeline"].call_count, 2)
 
     def test_tmap_429_and_5xx_abort_without_place_retry(self):
         from spontaneous.routing import search_tmap_transit_route
@@ -246,7 +296,7 @@ class SpontaneousCourseFallbackTest(TestCase):
             "data.app", level="INFO",
         ) as logs:
             self.assertEqual(post_json(COURSE_URL, payload(("SEA", "CAFE"))),
-                             (422, {"detail": "COURSE_NOT_FEASIBLE"}))
+                             (422, {"detail": "NO_ROUTE"}))
         attempts = [tuple(stop["contentId"] for stop in call.args[0])
                     for call in calls["timeline"].call_args_list]
         self.assertEqual(len(attempts), len(set(attempts)))

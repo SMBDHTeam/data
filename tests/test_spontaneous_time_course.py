@@ -77,7 +77,7 @@ class TimeAwareCourseTest(TestCase):
     def test_short_trip_does_not_silently_drop_required_themes_to_meet_cap(self):
         with providers(varied_places()) as calls:
             self.assertEqual(post_json(COURSE_URL, trip(20, 90, ("SEA", "CAFE", "FOOD", "NIGHT_VIEW"))),
-                             (422, {"detail": "COURSE_NOT_FEASIBLE"}))
+                             (422, {"detail": "COURSE_THEME_NOT_FEASIBLE"}))
         self.assertEqual(calls["routes"], [])
 
     def test_short_trip_can_trim_optional_stops_without_losing_requested_coverage(self):
@@ -109,7 +109,7 @@ class TimeAwareCourseTest(TestCase):
     def test_return_by_is_enforced_after_real_routing_for_night_cafe(self):
         with providers([place("c")], routing=lambda origin, destination, time: 20):
             self.assertEqual(post_json(COURSE_URL, trip(20, 90, ("CAFE",))),
-                             (422, {"detail": "COURSE_NOT_FEASIBLE"}))
+                             (422, {"detail": "COURSE_RETURN_TIME_EXCEEDED"}))
 
     def test_required_cafe_outranks_optional_night_view(self):
         with providers([place("c"), night_place("n")]):
@@ -209,7 +209,7 @@ class TimeAwareCourseTest(TestCase):
         records = [place(f"a{i}", "ACTIVITY", i) for i in range(1, 7)] + [place(f"c{i}", rank=i) for i in range(1, 7)]
         with providers(records, routing=lambda origin, destination, time: None) as calls:
             self.assertEqual(post_json(COURSE_URL, trip(20, 300, ("SEA", "CAFE"))),
-                             (422, {"detail": "COURSE_NOT_FEASIBLE"}))
+                             (422, {"detail": "NO_ROUTE"}))
         self.assertEqual(MAX_CANDIDATES_PER_ROLE, 5)
         self.assertEqual(MAX_COURSE_ATTEMPTS, 20)
         self.assertEqual(calls["timeline"].call_count, 20)

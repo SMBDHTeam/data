@@ -131,7 +131,11 @@ class SpontaneousCourseEndpointTest(TestCase):
     def test_closed_at_arrival_or_departure_still_rejects_required_place(self):
         for hours in ("14:00~18:00", "11:00~13:30"):
             with self.subTest(hours=hours), provider_boundaries(opening_hours=hours):
-                self.assert_rejected(course_request(), "PLACE_CLOSED_AT_VISIT_TIME")
+                self.assert_rejected(
+                    course_request(),
+                    "PLACE_CLOSED_AT_VISIT_TIME",
+                    "COURSE_PLACES_CLOSED",
+                )
 
     def test_course_preview_exposes_save_token_without_database_writes(self):
         with provider_boundaries(opening_hours="00:00~23:59"), patch(
@@ -284,11 +288,19 @@ class SpontaneousCourseEndpointTest(TestCase):
 
     def test_missing_required_role_is_distinguished(self):
         with provider_boundaries(places=[ACTIVITY]):
-            self.assert_rejected(course_request(), "MISSING_REQUIRED_ROLE")
+            self.assert_rejected(
+                course_request(),
+                "MISSING_REQUIRED_ROLE",
+                "COURSE_THEME_NOT_FEASIBLE",
+            )
 
     def test_missing_required_theme_is_distinguished(self):
         with provider_boundaries(places=[ACTIVITY]):
-            self.assert_rejected(course_request(themes=("SEA", "CULTURE")), "MISSING_REQUIRED_THEME")
+            self.assert_rejected(
+                course_request(themes=("SEA", "CULTURE")),
+                "MISSING_REQUIRED_THEME",
+                "COURSE_THEME_NOT_FEASIBLE",
+            )
 
     def test_outbound_and_return_no_route_are_logged(self):
         for missing_return in (False, True):
@@ -298,13 +310,17 @@ class SpontaneousCourseEndpointTest(TestCase):
                 return route_provider(mode, origin, destination, departure_at, cache)
 
             with self.subTest(missing_return=missing_return), provider_boundaries(provider=provider):
-                self.assert_rejected(course_request(), "NO_ROUTE")
+                self.assert_rejected(course_request(), "NO_ROUTE", "NO_ROUTE")
 
     def test_required_course_exceeding_return_time_is_logged(self):
         payload = course_request()
         payload.returnBy = payload.startAt + timedelta(hours=4)
         with provider_boundaries():
-            self.assert_rejected(payload, "RETURN_TIME_EXCEEDED")
+            self.assert_rejected(
+                payload,
+                "RETURN_TIME_EXCEEDED",
+                "COURSE_RETURN_TIME_EXCEEDED",
+            )
 
     def test_empty_initial_course_is_repaired_when_candidates_exist(self):
         with provider_boundaries(), patch("app.generate_course", return_value=[]):

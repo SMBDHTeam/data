@@ -112,6 +112,28 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model_artifacts" / "tourapi_category_classifier_linear_svc.joblib"
 PUBLIC_TRANSIT_DESTINATION_CANDIDATE_LIMIT = 2
 
+COURSE_FAILURE_DETAILS = {
+    "RETURN_TIME_EXCEEDED": "COURSE_RETURN_TIME_EXCEEDED",
+    "MISSING_REQUIRED_ROLE": "COURSE_THEME_NOT_FEASIBLE",
+    "MISSING_REQUIRED_THEME": "COURSE_THEME_NOT_FEASIBLE",
+    "STOP_LIMIT_EXCEEDED": "COURSE_THEME_NOT_FEASIBLE",
+    "PLACE_CLOSED_AT_VISIT_TIME": "COURSE_PLACES_CLOSED",
+    "NO_ROUTE": "NO_ROUTE",
+}
+
+
+def resolve_course_failure_detail(failure_reason_counts: Counter) -> str:
+    if not failure_reason_counts:
+        return "COURSE_NOT_FEASIBLE"
+
+    public_reasons = {
+        COURSE_FAILURE_DETAILS.get(reason)
+        for reason in failure_reason_counts
+    }
+    if None in public_reasons or len(public_reasons) != 1:
+        return "COURSE_NOT_FEASIBLE"
+    return public_reasons.pop()
+
 SELECTED_NUMERIC_COLS = [
     "mapx",
     "mapy",
@@ -956,10 +978,12 @@ def create_spontaneous_course(
     )
     routing_cache = {}
     last_failure_reason = "COURSE_NOT_FEASIBLE"
+    failure_reason_counts = Counter()
 
     def attempt_failed(reason, failed_index=None):
         nonlocal last_failure_reason
         last_failure_reason = reason
+        failure_reason_counts[reason] += 1
         stop = course[failed_index] if failed_index is not None else {}
         failed_role = stop.get("role")
         if reason in {"MISSING_REQUIRED_ROLE", "MISSING_REQUIRED_THEME"}:
@@ -1095,14 +1119,16 @@ def create_spontaneous_course(
         attempt_failed("RETURN_TIME_EXCEEDED")
         search.retry(course, last_failure_reason, timeline=timeline["course"])
 
+    final_failure_reason = resolve_course_failure_detail(failure_reason_counts)
     log.info(
         "spontaneous course search finished. destinationId=%s "
-        "failureReason=COURSE_NOT_FEASIBLE attempts=%s lastFailureReason=%s "
+        "failureReason=%s attempts=%s failureReasonCounts=%s lastFailureReason=%s "
         "searchLimitReached=%s transportMode=%s",
-        zone.destination_id, search.attempts, last_failure_reason,
+        zone.destination_id, final_failure_reason, search.attempts,
+        dict(sorted(failure_reason_counts.items())), last_failure_reason,
         bool(search.pending), request.transportMode.value,
     )
-    reject_course(last_failure_reason)
+    reject_course(last_failure_reason, final_failure_reason)
 
 
 @app.post(

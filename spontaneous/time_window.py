@@ -10,7 +10,7 @@ MAX_RETURN_HOUR_NEXT_DAY = 3
 
 
 class SpontaneousTimeWindowError(ValueError):
-    """Detailed internal reason; HTTP callers keep INVALID_TIME_RANGE public."""
+    """Stable failure reason returned by spontaneous-trip HTTP endpoints."""
 
     def __init__(self, failure_reason: str):
         super().__init__(failure_reason)
@@ -46,7 +46,7 @@ def validate_spontaneous_time_window(
         raise SpontaneousTimeWindowError("INVALID_TIME_RANGE") from exc
 
     if return_kst <= start_kst:
-        raise SpontaneousTimeWindowError("INVALID_TIME_RANGE")
+        raise SpontaneousTimeWindowError("SPONTANEOUS_RETURN_TIME_BEFORE_START")
     if start_kst.date() != now_kst.date():
         raise SpontaneousTimeWindowError("SPONTANEOUS_START_DATE_NOT_TODAY")
     if start_kst < now_kst - timedelta(minutes=START_TIME_PAST_TOLERANCE_MINUTES):

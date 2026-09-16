@@ -76,7 +76,7 @@ class SpontaneousTimeWindowTest(TestCase):
     def test_return_must_be_strictly_later_than_departure(self):
         for end in (NOW, NOW - timedelta(seconds=1), NOW.astimezone(timezone.utc)):
             with self.subTest(end=end):
-                self.reject(NOW, end, "INVALID_TIME_RANGE")
+                self.reject(NOW, end, "SPONTANEOUS_RETURN_TIME_BEFORE_START")
 
     def test_future_evening_start_uses_night_not_current_afternoon(self):
         self.validate(at("19:00"), at("23:00"), now=at("15:00"))
@@ -147,9 +147,20 @@ class SpontaneousTimeWindowTest(TestCase):
 
 
 class SpontaneousTimeWindowEndpointTest(TestCase):
-    def post(self, path, start, end, now=NOW, routing=None):
-        request = payload(("CAFE",))
+    def post(
+        self,
+        path,
+        start,
+        end,
+        now=NOW,
+        routing=None,
+        themes=("CAFE",),
+        transport_mode=None,
+    ):
+        request = payload(themes)
         request.update(startAt=start.isoformat(), returnBy=end.isoformat())
+        if transport_mode is not None:
+            request["transportMode"] = transport_mode
         if path == DESTINATIONS_URL:
             del request["destinationId"]
         with providers([place("c")], hours={"c": "00:00~03:00" if start.hour < 3 else "14:00~03:00"},
@@ -161,30 +172,30 @@ class SpontaneousTimeWindowEndpointTest(TestCase):
 
     def test_both_endpoints_have_identical_time_validation_results(self):
         cases = (
-            (NOW, at("23:00"), True),
-            (at("19:56"), at("23:00"), True),
-            (at("19:55"), at("23:00"), True),
-            (at("19:54"), at("23:00"), False),
-            (at("22:30"), at("01:00", 11), True),
-            (at("23:30"), at("03:00", 11), True),
-            (at("23:30"), at("03:00:01", 11), False),
-            (at("00:30", 11), at("02:30", 11), False),
-            (at("09:00", 11), at("12:00", 11), False),
-            (NOW, NOW, False),
-            (NOW, NOW - timedelta(seconds=1), False),
-            (NOW.replace(tzinfo=None), at("23:00"), False),
-            (NOW, at("23:00").replace(tzinfo=None), False),
-            (NOW.replace(tzinfo=None), at("23:00").replace(tzinfo=None), False),
+            (NOW, at("23:00"), None),
+            (at("19:56"), at("23:00"), None),
+            (at("19:55"), at("23:00"), None),
+            (at("19:54"), at("23:00"), "SPONTANEOUS_START_TIME_IN_PAST"),
+            (at("22:30"), at("01:00", 11), None),
+            (at("23:30"), at("03:00", 11), None),
+            (at("23:30"), at("03:00:01", 11), "SPONTANEOUS_RETURN_TIME_TOO_LATE"),
+            (at("00:30", 11), at("02:30", 11), "SPONTANEOUS_START_DATE_NOT_TODAY"),
+            (at("09:00", 11), at("12:00", 11), "SPONTANEOUS_START_DATE_NOT_TODAY"),
+            (NOW, NOW, "SPONTANEOUS_RETURN_TIME_BEFORE_START"),
+            (NOW, NOW - timedelta(seconds=1), "SPONTANEOUS_RETURN_TIME_BEFORE_START"),
+            (NOW.replace(tzinfo=None), at("23:00"), "SPONTANEOUS_TIMEZONE_REQUIRED"),
+            (NOW, at("23:00").replace(tzinfo=None), "SPONTANEOUS_TIMEZONE_REQUIRED"),
+            (NOW.replace(tzinfo=None), at("23:00").replace(tzinfo=None), "SPONTANEOUS_TIMEZONE_REQUIRED"),
         )
-        for start, end, valid in cases:
+        for start, end, expected_detail in cases:
             responses = []
             for path in (DESTINATIONS_URL, COURSE_URL):
                 with self.subTest(path=path, start=start, end=end):
                     status, body, calls, place_calls, _ = self.post(path, start, end)
                     responses.append(status)
-                    self.assertEqual(status, 200 if valid else 422, body)
-                    if not valid:
-                        self.assertEqual(body, {"detail": "INVALID_TIME_RANGE"})
+                    self.assertEqual(status, 200 if expected_detail is None else 422, body)
+                    if expected_detail is not None:
+                        self.assertEqual(body, {"detail": expected_detail})
                         self.assertEqual(place_calls, 0)
                         self.assertEqual(calls["routes"], [])
                         self.assertEqual(calls["details"], [])
@@ -233,7 +244,7 @@ class SpontaneousTimeWindowEndpointTest(TestCase):
             self.assertEqual(status, 200, body)
             tomorrow = at("00:30", 11).astimezone(timezone.utc)
             status, body, calls, _, _ = self.post(path, tomorrow, tomorrow + timedelta(hours=2))
-            self.assertEqual((status, body), (422, {"detail": "INVALID_TIME_RANGE"}))
+            self.assertEqual((status, body), (422, {"detail": "SPONTANEOUS_START_DATE_NOT_TODAY"}))
             self.assertEqual(calls["routes"], [])
 
     def test_naive_and_aware_json_still_have_unchanged_pydantic_field_schema(self):
@@ -251,22 +262,48 @@ class SpontaneousTimeWindowEndpointTest(TestCase):
             parsed = model.model_validate(request)
             self.assertIsNone(parsed.startAt.tzinfo)
 
-    def test_internal_reasons_are_logged_but_public_detail_stays_compatible(self):
+    def test_time_reasons_are_returned_and_logged_with_structured_context(self):
         cases = (
             (at("19:54"), at("23:00"), "SPONTANEOUS_START_TIME_IN_PAST"),
             (at("00:30", 11), at("02:30", 11), "SPONTANEOUS_START_DATE_NOT_TODAY"),
             (at("23:30"), at("03:00:01", 11), "SPONTANEOUS_RETURN_TIME_TOO_LATE"),
             (NOW.replace(tzinfo=None), at("23:00"), "SPONTANEOUS_TIMEZONE_REQUIRED"),
-            (NOW, NOW, "INVALID_TIME_RANGE"),
+            (NOW, NOW, "SPONTANEOUS_RETURN_TIME_BEFORE_START"),
         )
         for start, end, reason in cases:
             for path in (DESTINATIONS_URL, COURSE_URL):
                 with self.subTest(path=path, reason=reason):
                     status, body, _, _, message = self.post(path, start, end)
-                    self.assertEqual((status, body), (422, {"detail": "INVALID_TIME_RANGE"}))
-                    self.assertIn("failureReason=" + reason, message)
+                    self.assertEqual((status, body), (422, {"detail": reason}))
+                    self.assertIn("endpoint=" + ("destinations" if path == DESTINATIONS_URL else "course"), message)
+                    self.assertIn("externalFailureReason=" + reason, message)
+                    self.assertIn("internalFailureReason=" + reason, message)
+                    self.assertIn("transportMode=PUBLIC_TRANSIT", message)
+                    self.assertIn("candidateCount=0", message)
+                    self.assertIn("attemptCount=0", message)
                     for forbidden in ("test-key", str(START.latitude), str(START.longitude), "startLocation", "desiredThemes"):
                         self.assertNotIn(forbidden, message)
+
+    def test_reported_request_returns_start_time_in_past(self):
+        start = datetime.fromisoformat("2026-09-16T23:26:00+09:00")
+        end = datetime.fromisoformat("2026-09-17T03:00:00+09:00")
+        now = datetime.fromisoformat("2026-09-16T23:45:19+09:00")
+        for path in (DESTINATIONS_URL, COURSE_URL):
+            with self.subTest(path=path):
+                status, body, calls, place_calls, _ = self.post(
+                    path,
+                    start,
+                    end,
+                    now=now,
+                    themes=("SEAFOOD", "WALK"),
+                    transport_mode="WALK",
+                )
+                self.assertEqual(
+                    (status, body),
+                    (422, {"detail": "SPONTANEOUS_START_TIME_IN_PAST"}),
+                )
+                self.assertEqual(place_calls, 0)
+                self.assertEqual(calls["routes"], [])
 
     def test_clock_is_sampled_once_even_when_provider_work_crosses_tolerance(self):
         for path in (DESTINATIONS_URL, COURSE_URL):

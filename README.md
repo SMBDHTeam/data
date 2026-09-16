@@ -209,12 +209,12 @@ SKT_API_KEY=...
   예를 들어 now=15:00, startAt=19:00이면 NIGHT이고, 다음날 00:30 방문은 LATE_NIGHT다.
 - 검증은 각 요청에서 다시 수행한다. 목적지 조회 후 시간이 지나 허용 오차나 KST 날짜 경계를 넘으면 동일한 출발시간도 더 이상 유효하지 않을 수 있다.
 
-시간 정책 위반은 기존 `HTTP 422 {"detail":"INVALID_TIME_RANGE"}`로 반환한다.
-내부 로그의 `failureReason`은 `SPONTANEOUS_TIMEZONE_REQUIRED`,
-`SPONTANEOUS_START_DATE_NOT_TODAY`, `SPONTANEOUS_START_TIME_IN_PAST`,
-`SPONTANEOUS_RETURN_TIME_TOO_LATE`, `INVALID_TIME_RANGE`로 구분한다.
-확인한 Spring `FastApiSpontaneousClient`는 `INVALID_TIME_RANGE`를
-공개 API의 `400 INVALID_SPONTANEOUS_TRIP_REQUEST`로 매핑하므로 새 detail은 노출하지 않는다.
+시간 정책 위반은 HTTP 422를 유지하면서 `detail`을
+`SPONTANEOUS_TIMEZONE_REQUIRED`, `SPONTANEOUS_START_DATE_NOT_TODAY`,
+`SPONTANEOUS_START_TIME_IN_PAST`, `SPONTANEOUS_RETURN_TIME_BEFORE_START`,
+`SPONTANEOUS_RETURN_TIME_TOO_LATE`로 구분한다. 시간대 변환 자체가 불가능한 예외 상황은
+기존 `INVALID_TIME_RANGE`를 유지한다. SERVER는 각 detail을 사용자 행동 지침이 포함된
+공개 오류 코드로 변환한다.
 
 **호환성 변경:** DATA의 기존 Pydantic `datetime` 필드는 naive 입력도 파싱했지만,
 이제 두 엔드포인트에서 이를 명시적으로 거부한다. DATA 직접 호출자는 offset을 포함해야 한다.

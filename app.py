@@ -621,15 +621,23 @@ def get_schedule_map_endpoint(schedule_id: UUID, dayNo: int | None = None) -> Sc
 
 def validate_spontaneous_request_time(
     request: SpontaneousDestinationRequest | SpontaneousCourseRequest,
+    endpoint: str,
 ) -> None:
     try:
         validate_spontaneous_time_window(request.startAt, request.returnBy)
     except SpontaneousTimeWindowError as exc:
-        log.info("spontaneous time window rejected. failureReason=%s", exc.failure_reason)
-        # Spring explicitly maps this existing detail to a client input error.
+        log.info(
+            "spontaneous time window rejected. endpoint=%s "
+            "externalFailureReason=%s internalFailureReason=%s "
+            "transportMode=%s candidateCount=0 attemptCount=0",
+            endpoint,
+            exc.failure_reason,
+            exc.failure_reason,
+            request.transportMode.value,
+        )
         raise HTTPException(
             status_code=422,
-            detail="INVALID_TIME_RANGE",
+            detail=exc.failure_reason,
         ) from exc
 
 
@@ -637,7 +645,7 @@ def validate_spontaneous_request_time(
 def recommend_spontaneous_destinations(
     request: SpontaneousDestinationRequest,
 ) -> SpontaneousDestinationResponse:
-    validate_spontaneous_request_time(request)
+    validate_spontaneous_request_time(request, "destinations")
 
     time_profile = resolve_time_profile(request.startAt)
     log.info(
@@ -820,14 +828,16 @@ def recommend_spontaneous_destinations(
             status_code, detail = 404, "DESTINATIONS_NOT_FOUND"
 
         log.info(
-            "spontaneous destinations rejected. transportMode=%s "
-            "routingCandidateCount=%s successCandidateCount=%s "
-            "failureReasonCounts=%s errorCode=%s",
+            "spontaneous destinations rejected. endpoint=destinations "
+            "externalFailureReason=%s internalFailureReasons=%s "
+            "transportMode=%s candidateCount=%s attemptCount=%s "
+            "successCandidateCount=%s",
+            detail,
+            dict(sorted(failure_reason_counts.items())),
             request.transportMode.value,
+            len(candidates),
             routing_candidate_count,
             len(results),
-            dict(sorted(failure_reason_counts.items())),
-            detail,
         )
         raise HTTPException(status_code=status_code, detail=detail)
 
@@ -845,7 +855,7 @@ def create_spontaneous_course(
     # Unit callers invoke the function directly, in which case FastAPI leaves the
     # Header descriptor in the default argument. Only an actual integer is trusted.
     auth_user_id = auth_user_id if isinstance(auth_user_id, int) else None
-    validate_spontaneous_request_time(request)
+    validate_spontaneous_request_time(request, "course")
     time_profile = resolve_time_profile(request.startAt)
 
     zone = find_destination_zone(
@@ -895,15 +905,24 @@ def create_spontaneous_course(
     grouped_places = {}
     course = []
 
-    def reject_course(failure_reason: str, detail: str = "COURSE_NOT_FEASIBLE"):
+    def reject_course(
+        failure_reason: str,
+        detail: str = "COURSE_NOT_FEASIBLE",
+        attempt_count: int = 0,
+    ):
         log.info(
-            "spontaneous course rejected. destinationId=%s failureReason=%s "
-            "transportMode=%s desiredThemes=%s startAt=%s returnBy=%s "
+            "spontaneous course rejected. endpoint=course destinationId=%s "
+            "externalFailureReason=%s internalFailureReason=%s "
+            "transportMode=%s candidateCount=%s attemptCount=%s "
+            "desiredThemes=%s startAt=%s returnBy=%s "
             "placesBeforeFilter=%s placesAfterFilter=%s requiredRoles=%s "
             "availableRoles=%s courseStopCount=%s",
             zone.destination_id,
+            detail,
             failure_reason,
             request.transportMode.value,
+            after_count,
+            attempt_count,
             sorted(desired_themes),
             request.startAt.isoformat(),
             request.returnBy.isoformat(),
@@ -1128,7 +1147,7 @@ def create_spontaneous_course(
         dict(sorted(failure_reason_counts.items())), last_failure_reason,
         bool(search.pending), request.transportMode.value,
     )
-    reject_course(last_failure_reason, final_failure_reason)
+    reject_course(last_failure_reason, final_failure_reason, search.attempts)
 
 
 @app.post(

@@ -275,6 +275,25 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
             "SPONTANEOUS_DESTINATION_TRANSPORT_CONSTRAINT",
         )
 
+    def test_unknown_routing_failure_keeps_generic_fallback(self):
+        calls, fake_get_transport_option = self.get_transport_call_counter(
+            {
+                "ZONE_1": "UNKNOWN_ROUTING_FAILURE",
+                "ZONE_2": "NO_ROUTE",
+            }
+        )
+
+        with self.patch_preranking():
+            with patch("app.get_transport_option", side_effect=fake_get_transport_option):
+                with self.assertRaises(HTTPException) as error:
+                    data_app.recommend_spontaneous_destinations(
+                        request(TransportMode.PUBLIC_TRANSIT)
+                    )
+
+        self.assertEqual(calls, ["ZONE_1", "ZONE_2"])
+        self.assertEqual(error.exception.status_code, 404)
+        self.assertEqual(error.exception.detail, "DESTINATIONS_NOT_FOUND")
+
     def test_no_routing_candidates_returns_place_or_theme_reason(self):
         with patch.multiple(
             data_app,
@@ -350,11 +369,13 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
             if "spontaneous destinations rejected" in message
         )
         self.assertEqual(calls, ["ZONE_1", "ZONE_2"])
+        self.assertIn("endpoint=destinations", failure_log)
+        self.assertIn("externalFailureReason=SPONTANEOUS_DESTINATION_ROUTE_NOT_FOUND", failure_log)
+        self.assertIn("internalFailureReasons={'NO_ROUTE': 2}", failure_log)
         self.assertIn("transportMode=PUBLIC_TRANSIT", failure_log)
-        self.assertIn("routingCandidateCount=2", failure_log)
+        self.assertIn("candidateCount=8", failure_log)
+        self.assertIn("attemptCount=2", failure_log)
         self.assertIn("successCandidateCount=0", failure_log)
-        self.assertIn("failureReasonCounts={'NO_ROUTE': 2}", failure_log)
-        self.assertIn("errorCode=SPONTANEOUS_DESTINATION_ROUTE_NOT_FOUND", failure_log)
         self.assertNotIn(str(START.latitude), failure_log)
         self.assertNotIn(str(START.longitude), failure_log)
 

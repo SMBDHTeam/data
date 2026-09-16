@@ -100,9 +100,11 @@ class SpontaneousCourseEndpointTest(TestCase):
         self.assertEqual(error.exception.status_code, 422)
         self.assertEqual(error.exception.detail, detail)
         message = "\n".join(logs.output)
-        self.assertIn("failureReason=" + reason, message)
+        self.assertIn("internalFailureReason=" + reason, message)
         for field in (
-            "destinationId=BUSAN_GWANGALLI", "transportMode=", "desiredThemes=",
+            "endpoint=course", "destinationId=BUSAN_GWANGALLI",
+            "externalFailureReason=" + detail, "transportMode=", "candidateCount=",
+            "attemptCount=", "desiredThemes=",
             "startAt=", "returnBy=", "placesBeforeFilter=", "placesAfterFilter=",
             "requiredRoles=", "availableRoles=", "courseStopCount=",
         ):

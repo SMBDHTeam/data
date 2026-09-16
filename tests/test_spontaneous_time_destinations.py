@@ -131,7 +131,10 @@ class TimeAwareDestinationTest(TestCase):
         request.update(startAt="2026-09-10T20:00:00", returnBy="2026-09-10T23:00:00")
         with providers(COURSE_PLACES) as calls, self.assertLogs("data.app", level="INFO") as logs:
             status, body = post_json(DESTINATIONS_URL, request)
-        self.assertEqual((status, body), (422, {"detail": "INVALID_TIME_RANGE"}))
-        self.assertIn("failureReason=SPONTANEOUS_TIMEZONE_REQUIRED", "\n".join(logs.output))
+        self.assertEqual((status, body), (422, {"detail": "SPONTANEOUS_TIMEZONE_REQUIRED"}))
+        self.assertIn(
+            "internalFailureReason=SPONTANEOUS_TIMEZONE_REQUIRED",
+            "\n".join(logs.output),
+        )
         self.assertEqual(calls["routes"], [])
         self.assertEqual(calls["details"], [])

@@ -34,7 +34,9 @@ def course_request(
         destinationId=destination_id,
         startLocation=START,
         startAt=START_AT.replace(hour=10),
-        returnBy=START_AT.replace(hour=18),
+        # The test route spends 190 minutes on the round trip, leaving 110
+        # onsite minutes so these endpoint-focused cases legitimately use one stop.
+        returnBy=START_AT.replace(hour=15),
         desiredThemes=list(themes),
         transportMode=mode,
     )

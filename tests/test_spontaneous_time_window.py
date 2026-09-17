@@ -163,7 +163,8 @@ class SpontaneousTimeWindowEndpointTest(TestCase):
             request["transportMode"] = transport_mode
         if path == DESTINATIONS_URL:
             del request["destinationId"]
-        with providers([place("c")], hours={"c": "00:00~03:00" if start.hour < 3 else "14:00~03:00"},
+        records = [place("c"), place("a", "ACTIVITY", 2), place("m", "MEAL", 3)]
+        with providers(records, hours={"c": "00:00~03:00" if start.hour < 3 else "14:00~03:00"},
                        routing=routing, now=now) as calls, patch(
             "app.search_places_by_zone", wraps=data_app.search_places_by_zone,
         ) as places, self.assertLogs("data.app", level="INFO") as logs:
@@ -229,8 +230,8 @@ class SpontaneousTimeWindowEndpointTest(TestCase):
         self.assertEqual(arrival, at("00:30", 11))
         self.assertEqual(resolve_time_profile(arrival), TimeProfile.LATE_NIGHT)
         self.assertLessEqual(datetime.fromisoformat(body["estimatedReturnAt"]), at("03:00", 11))
-        self.assertEqual(calls["timeline"].call_count, 1)
-        self.assertEqual(calls["details"], ["c"])
+        self.assertLessEqual(calls["timeline"].call_count, 20)
+        self.assertEqual(calls["details"], ["c", "m"])
 
     def test_same_day_early_morning_is_allowed_on_both_endpoints(self):
         for path in (DESTINATIONS_URL, COURSE_URL):
@@ -309,7 +310,7 @@ class SpontaneousTimeWindowEndpointTest(TestCase):
         for path in (DESTINATIONS_URL, COURSE_URL):
             request = payload(("CAFE",))
             request.update(startAt=NOW.isoformat(), returnBy=at("23:00").isoformat())
-            with providers([place("c")], now=NOW), patch(
+            with providers([place("c"), place("a", "ACTIVITY", 2), place("m", "MEAL", 3)], now=NOW), patch(
                 "spontaneous.time_window.current_kst_time", side_effect=[NOW, NOW + timedelta(minutes=6)],
             ) as clock:
                 status, body = post_json(path, request)

@@ -12,12 +12,22 @@ COURSE_STOP_POLICY = (
 
 
 def course_stop_range(onsite_minutes: int) -> tuple[int, int]:
-    """Return the inclusive stop target for time actually available onsite."""
+    """Return the preferred minimum and hard maximum for onsite time."""
     return next(
         (minimum, maximum)
         for upper, minimum, maximum in COURSE_STOP_POLICY
         if upper is None or onsite_minutes < upper
     )
+
+
+def minimum_acceptable_course_stops(onsite_minutes: int) -> int:
+    """Return the hard minimum after preferred-density alternatives fail.
+
+    Four or more onsite hours should normally produce three stops, but a valid
+    two-stop course is more useful than rejecting the destination altogether.
+    Shorter windows may fall back from two preferred stops to one.
+    """
+    return 2 if onsite_minutes >= 240 else 1
 
 
 def calculate_onsite_minutes(

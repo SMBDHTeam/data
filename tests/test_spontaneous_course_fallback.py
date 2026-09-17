@@ -212,14 +212,13 @@ class SpontaneousCourseFallbackTest(TestCase):
             self.assert_success(post_json(COURSE_URL, payload(("SEA",), minutes=200)), ["a1", "c2"])
         self.assertEqual(calls["timeline"].call_count, 2)
 
-    def test_all_optional_candidates_fail_when_minimum_cannot_be_met(self):
+    def test_valid_required_stop_is_returned_when_optional_target_cannot_be_met(self):
         with providers(
             [place("a1", "ACTIVITY"), place("c1"), place("c2", rank=2)],
             hours={"c1": "00:00~01:00", "c2": "00:00~01:00"},
         ) as calls:
-            self.assertEqual(
-                post_json(COURSE_URL, payload(("SEA",), minutes=200)),
-                (422, {"detail": "COURSE_NOT_FEASIBLE"}),
+            self.assert_success(
+                post_json(COURSE_URL, payload(("SEA",), minutes=200)), ["a1"],
             )
         self.assertGreaterEqual(calls["timeline"].call_count, 3)
         self.assertEqual(len(calls["routes"]), len(set(calls["routes"])))

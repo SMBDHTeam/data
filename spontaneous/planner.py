@@ -2,7 +2,6 @@
 
 from collections import OrderedDict
 from datetime import datetime, timedelta
-import random
 
 from spontaneous.course import (
     ROLE_MAX_REQUIRED_STOPS,
@@ -15,7 +14,6 @@ from spontaneous.course import (
     estimate_visit_at,
     limit_optional_course_stops,
     normalize_course_orders,
-    order_course_candidates,
     place_ranking_key,
     select_best_covering_place,
 )
@@ -87,8 +85,7 @@ def course_identity(course: list[dict]) -> tuple:
 
 class CourseCandidateSearch:
     def __init__(self, initial_course, ranked_candidates, desired_themes,
-                 start_location, role_plan, start_at=None, transport_mode=None,
-                 max_stops=None, rng: random.Random | None = None):
+                 start_location, role_plan, start_at=None, transport_mode=None, max_stops=None):
         self.candidates = ranked_candidates
         self.desired_themes = desired_themes
         self.start_location = start_location
@@ -96,7 +93,6 @@ class CourseCandidateSearch:
         self.start_at = start_at
         self.transport_mode = transport_mode
         self.max_stops = max_stops
-        self.rng = rng
         self.required = get_required_themes_by_role(desired_themes)
         self.pending = OrderedDict([(course_identity(initial_course), initial_course)])
         self.visited = set()
@@ -114,14 +110,12 @@ class CourseCandidateSearch:
         candidates = self.candidates.get(role, [])
         required_themes = self.required.get(role, set())
         if not required_themes:
-            ordered = order_course_candidates(
-                candidates, self.desired_themes, role, cursor,
-                departure_at=departure_at, transport_mode=self.transport_mode,
-                visit_at=visit_at, rng=self.rng,
-            )
             options = [[build_course_stop(
                 place, 1, role, stay_minutes, self.desired_themes, cursor, False,
-            )] for place in ordered]
+            )] for place in sorted(candidates, key=lambda item: place_ranking_key(
+                item, self.desired_themes, role, cursor,
+                departure_at=departure_at, transport_mode=self.transport_mode, visit_at=visit_at,
+            ))]
             # Exhaust same-role replacements before dropping an optional role.
             return options + [[]]
 
@@ -134,12 +128,11 @@ class CourseCandidateSearch:
                 return
             if len(selected) >= max_stops:
                 return
-            for place in order_course_candidates(
-                candidates, self.desired_themes, role, location,
-                required_themes=remaining, departure_at=cursor_time,
-                transport_mode=self.transport_mode,
-                visit_at=visit_at if not selected else None, rng=self.rng,
-            ):
+            for place in sorted(candidates, key=lambda item: place_ranking_key(
+                item, self.desired_themes, role, location, remaining_themes=remaining,
+                departure_at=cursor_time, transport_mode=self.transport_mode,
+                visit_at=visit_at if not selected else None,
+            )):
                 identity = get_place_identity(place)
                 coverage = remaining & get_place_themes(place)
                 if identity in used or not coverage:
@@ -172,67 +165,11 @@ class CourseCandidateSearch:
         return sum(calculate_distance_meters(origin, destination)
                    for origin, destination in zip(locations, locations[1:]))
 
-    def _supplement_options(self, course: list[dict], target_min_stops: int) -> list[list[dict]]:
-        """Add one balanced, unique stop; the endpoint reroutes every result."""
-        if len(course) >= target_min_stops or len(course) >= (self.max_stops or target_min_stops):
-            return []
-
-        selected_keys = {get_place_identity(stop) for stop in course}
-        role_counts = {
-            role: sum(stop["role"] == role for stop in course)
-            for role, _ in self.role_plan
-        }
-        plan_order = {role: index for index, (role, _) in enumerate(self.role_plan)}
-        roles = sorted(
-            plan_order,
-            key=lambda role: (role_counts.get(role, 0), plan_order[role]),
-        )
-        alternatives = []
-        for role in roles:
-            # Prefer role breadth and permit at most one balanced repeat. This
-            # prevents a minimum target from becoming three cafes or meals.
-            if role_counts.get(role, 0) >= 2:
-                continue
-            candidates = [
-                candidate for candidate in self.candidates.get(role, [])
-                if get_place_identity(candidate) not in selected_keys
-            ]
-            if not candidates:
-                continue
-            stay_minutes = dict(self.role_plan)[role]
-            for candidate in order_course_candidates(
-                candidates, self.desired_themes, role, self.start_location,
-                departure_at=self.start_at, transport_mode=self.transport_mode,
-                rng=self.rng,
-            ):
-                added = build_course_stop(
-                    candidate, len(course) + 1, role, stay_minutes,
-                    self.desired_themes, self.start_location, False,
-                )
-                blocks = {planned_role: [] for planned_role, _ in self.role_plan}
-                for stop in course:
-                    blocks[stop["role"]].append(stop)
-                blocks[role].append(added)
-                alternative = normalize_course_orders([
-                    stop
-                    for planned_role, _ in self.role_plan
-                    for stop in blocks[planned_role]
-                ])
-                alternatives.append(alternative)
-        return alternatives
-
     def retry(self, course: list[dict], reason: str, failed_index: int | None = None,
-              timeline: list[dict] | None = None,
-              target_min_stops: int | None = None) -> None:
+              timeline: list[dict] | None = None) -> None:
         roles = [role for role, _ in self.role_plan]
         role_order = {role: index for index, role in enumerate(roles)}
         present_roles = {stop["role"] for stop in course}
-        if reason == "STOP_COUNT_BELOW_MINIMUM" and target_min_stops is not None:
-            for alternative in self._supplement_options(course, target_min_stops):
-                identity = course_identity(alternative)
-                if identity not in self.visited and identity not in self.pending:
-                    self.pending[identity] = alternative
-            return
         if failed_index is not None:
             preferred = [course[failed_index]["role"]]
             # An unroutable edge can also be fixed by replacing its origin.
@@ -253,6 +190,10 @@ class CourseCandidateSearch:
 
         urgent = OrderedDict()
         for role in dict.fromkeys([*preferred, *roles]):
+            if course and role not in self.required and role not in present_roles:
+                # Once omitted, keep this branch lean while repairing required
+                # stops. Earlier branches still retain optional alternatives.
+                continue
             cursor = self.start_location
             cursor_time = self.start_at
             # Times are local to this failed attempt, never cached by role across

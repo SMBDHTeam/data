@@ -4,7 +4,6 @@ from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
-from random import Random
 from unittest import TestCase
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -42,9 +41,7 @@ def place(content_id, role="CAFE", rank=1):
     }
 
 
-def payload(themes=("CAFE",), minutes=None):
-    if minutes is None:
-        minutes = 160 if len(set(themes)) > 1 else 120
+def payload(themes=("CAFE",), minutes=480):
     start = START_AT.replace(hour=10)
     return {
         "destinationId": "BUSAN_GWANGALLI",
@@ -122,7 +119,6 @@ def providers(places, hours=None, routing=None, now=START_AT):
         patch("app.search_places_by_zone", side_effect=lambda zone, places_cache=None: places),
         patch("spontaneous.places.urlopen", side_effect=detail),
         patch("spontaneous.routing.search_tmap_transit_route", side_effect=route),
-        patch("app.COURSE_RNG_FACTORY", return_value=Random(1)),
         patch("app.calculate_sequential_course_timeline", wraps=calculate_sequential_course_timeline) as timeline,
     ):
         calls["timeline"] = timeline
@@ -173,7 +169,7 @@ class SpontaneousCourseFallbackTest(TestCase):
             [place("c1"), place("c2", rank=2)],
             routing=lambda origin, destination, time: 70 if "c1" in (origin, destination) else 10,
         ) as calls, self.assertLogs("data.app", level="INFO") as logs:
-            self.assert_success(post_json(COURSE_URL, payload(minutes=139)), ["c2"])
+            self.assert_success(post_json(COURSE_URL, payload(minutes=150)), ["c2"])
         self.assertEqual(calls["timeline"].call_count, 2)
         self.assertIn("failureReason=RETURN_TIME_EXCEEDED", "\n".join(logs.output))
 
@@ -182,45 +178,40 @@ class SpontaneousCourseFallbackTest(TestCase):
             [place("a1", "ACTIVITY"), place("c1"), place("c2", rank=2)],
             routing=lambda origin, destination, time: 200 if "c1" in (origin, destination) else 10,
         ) as calls:
-            self.assert_success(post_json(COURSE_URL, payload(("SEA",), minutes=230)), ["a1", "c2"])
+            self.assert_success(post_json(COURSE_URL, payload(("SEA",), minutes=300)), ["a1", "c2"])
         self.assertEqual(calls["timeline"].call_count, 2)
 
-    def test_minimum_density_readds_optional_after_required_replacement(self):
+    def test_return_time_drops_optional_then_replaces_required_without_readding_optional(self):
         with providers(
             [place("a1", "ACTIVITY"), place("a2", "ACTIVITY", 2), place("c1"), place("c2", rank=2)],
             routing=lambda origin, destination, time: 150 if "a1" in (origin, destination) else 10,
         ) as calls:
-            self.assert_success(
-                post_json(COURSE_URL, payload(("SEA",), minutes=300)),
-                ["a2", "c1", "c2"],
-            )
+            self.assert_success(post_json(COURSE_URL, payload(("SEA",), minutes=300)), ["a2"])
         attempts = [[stop["contentId"] for stop in call.args[0]] for call in calls["timeline"].call_args_list]
-        self.assertIn(["a2", "c1", "c2"], attempts)
+        self.assertEqual(attempts, [["a1", "c1"], ["a1", "c2"], ["a1"], ["a2"]])
 
     def test_return_time_can_require_replacing_two_required_roles(self):
         with providers(
             [place("a1", "ACTIVITY"), place("a2", "ACTIVITY", 2), place("c1"), place("c2", rank=2)],
             routing=lambda origin, destination, time: 150 if {origin, destination} & {"a1", "c1"} else 10,
         ):
-            self.assert_success(post_json(COURSE_URL, payload(("SEA", "CAFE"), minutes=230)), ["a2", "c2"])
+            self.assert_success(post_json(COURSE_URL, payload(("SEA", "CAFE"), minutes=300)), ["a2", "c2"])
 
     def test_optional_closed_cafe_is_replaced_before_omission(self):
         with providers(
             [place("a1", "ACTIVITY"), place("c1"), place("c2", rank=2)],
             hours={"c1": "00:00~01:00"},
         ) as calls:
-            self.assert_success(post_json(COURSE_URL, payload(("SEA",), minutes=200)), ["a1", "c2"])
+            self.assert_success(post_json(COURSE_URL, payload(("SEA",))), ["a1", "c2"])
         self.assertEqual(calls["timeline"].call_count, 2)
 
-    def test_valid_required_stop_is_returned_when_optional_target_cannot_be_met(self):
+    def test_all_optional_candidates_fail_then_required_course_succeeds(self):
         with providers(
             [place("a1", "ACTIVITY"), place("c1"), place("c2", rank=2)],
             hours={"c1": "00:00~01:00", "c2": "00:00~01:00"},
         ) as calls:
-            self.assert_success(
-                post_json(COURSE_URL, payload(("SEA",), minutes=200)), ["a1"],
-            )
-        self.assertGreaterEqual(calls["timeline"].call_count, 3)
+            self.assert_success(post_json(COURSE_URL, payload(("SEA",))), ["a1"])
+        self.assertEqual(calls["timeline"].call_count, 3)
         self.assertEqual(len(calls["routes"]), len(set(calls["routes"])))
 
     def test_all_five_required_cafes_closed_exhausts_candidates(self):
@@ -333,7 +324,7 @@ class SpontaneousCourseFallbackTest(TestCase):
             [place("a1", "ACTIVITY"), place("a2", "ACTIVITY", 2), place("c1")],
             routing=lambda origin, destination, time: None if (origin, destination) == ("a1", "c1") else 10,
         ):
-            self.assert_success(post_json(COURSE_URL, payload(("SEA", "CAFE"), minutes=230)), ["a2", "c1"])
+            self.assert_success(post_json(COURSE_URL, payload(("SEA", "CAFE"))), ["a2", "c1"])
 
     def test_same_cafe_can_succeed_after_upstream_arrival_time_changes(self):
         with providers(
@@ -341,7 +332,7 @@ class SpontaneousCourseFallbackTest(TestCase):
             hours={"c1": "12:00~18:00"},
             routing=lambda origin, destination, time: 80 if destination == "a2" else 10,
         ):
-            self.assert_success(post_json(COURSE_URL, payload(("SEA", "CAFE"), minutes=230)), ["a2", "c1"])
+            self.assert_success(post_json(COURSE_URL, payload(("SEA", "CAFE"))), ["a2", "c1"])
 
     def test_no_route_cache_does_not_poison_same_place_at_later_departure(self):
         def routing(origin, destination, time):
@@ -352,7 +343,7 @@ class SpontaneousCourseFallbackTest(TestCase):
         with providers(
             [place("a1", "ACTIVITY"), place("a2", "ACTIVITY", 2), place("c1")], routing=routing,
         ) as calls:
-            self.assert_success(post_json(COURSE_URL, payload(("SEA", "CAFE"), minutes=230)), ["a2", "c1"])
+            self.assert_success(post_json(COURSE_URL, payload(("SEA", "CAFE"))), ["a2", "c1"])
         self.assertEqual(calls["timeline"].call_count, 2)
         self.assertEqual(len(calls["routes"]), len(set(calls["routes"])))
 
@@ -448,12 +439,12 @@ class SpontaneousCourseFallbackTest(TestCase):
             "destinationId": "BUSAN_SONGJEONG",
             "transportMode": "CAR",
             "startAt": "2026-09-08T13:00:00+09:00",
-            "returnBy": "2026-09-08T15:30:00+09:00",
+            "returnBy": "2026-09-08T21:00:00+09:00",
         })
         utc_request = {
             **request,
             "startAt": "2026-09-08T04:00:00Z",
-            "returnBy": "2026-09-08T06:30:00Z",
+            "returnBy": "2026-09-08T12:00:00Z",
             "validTimeRange": True,
         }
 

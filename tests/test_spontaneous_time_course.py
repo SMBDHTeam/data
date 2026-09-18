@@ -1,24 +1,15 @@
 from datetime import datetime, timedelta, timezone
-from random import Random
 from unittest import TestCase
-from unittest.mock import patch
 
 from spontaneous.course import (
     build_course_role_plan,
     course_stop_range,
     generate_course,
-    get_place_identity,
-    order_course_candidates,
     place_ranking_key,
-)
-from spontaneous.course_policy import (
-    calculate_onsite_minutes,
-    minimum_acceptable_course_stops,
 )
 from spontaneous.models import TransportMode
 from spontaneous.places import base_course_place
 from spontaneous.planner import CourseCandidateSearch, MAX_CANDIDATES_PER_ROLE, MAX_COURSE_ATTEMPTS, rank_course_candidates
-from spontaneous.routing import get_transport_option, route_result_from_minutes
 from spontaneous.time_profile import TimeProfile, resolve_time_profile
 from tests.test_spontaneous_course_fallback import COURSE_URL, payload, place, post_json, providers
 from tests.test_spontaneous_destination_routing_limit import START, START_AT
@@ -53,10 +44,9 @@ class TimeAwareCourseTest(TestCase):
 
     def check_duration(self, minutes, minimum, maximum):
         with providers(varied_places()) as calls:
-            body = self.assert_success(post_json(COURSE_URL, trip(15, minutes + 20)), minimum, maximum)
-        self.assertGreaterEqual(calls["timeline"].call_count, 1)
-        self.assertLessEqual(calls["timeline"].call_count, MAX_COURSE_ATTEMPTS)
-        self.assertGreaterEqual(len(calls["routes"]), len(body["course"]) + 1)
+            body = self.assert_success(post_json(COURSE_URL, trip(15, minutes)), minimum, maximum)
+        self.assertEqual(calls["timeline"].call_count, 1)
+        self.assertEqual(len(calls["routes"]), len(body["course"]) + 1)
         self.assertEqual(course_stop_range(minutes), (minimum, maximum))
 
     def test_ninety_minutes_has_at_most_two_stops(self):
@@ -68,202 +58,27 @@ class TimeAwareCourseTest(TestCase):
     def test_five_hours_targets_three_to_four_stops(self):
         self.check_duration(300, 3, 4)
 
-    def test_seven_hours_still_has_at_most_four_stops(self):
-        self.check_duration(420, 3, 4)
+    def test_seven_hours_targets_four_to_five_stops(self):
+        self.check_duration(420, 4, 5)
 
     def test_stop_policy_exact_boundaries(self):
         for minutes, expected in ((119, (1, 2)), (120, (2, 3)), (239, (2, 3)),
-                                  (240, (3, 4)), (359, (3, 4)), (360, (3, 4))):
-            onsite = calculate_onsite_minutes(
-                START_AT, START_AT + timedelta(minutes=minutes + 20), 10, 10,
-            )
-            self.assertEqual(onsite, minutes)
+                                  (240, (3, 4)), (359, (3, 4)), (360, (4, 5))):
             self.assertEqual(course_stop_range(minutes), expected)
 
-    def test_hard_minimum_allows_a_smaller_valid_fallback(self):
-        for minutes, expected in ((119, 1), (120, 1), (239, 1), (240, 2), (420, 2)):
-            self.assertEqual(minimum_acceptable_course_stops(minutes), expected)
-
-    def test_four_hour_onsite_window_builds_three_or_four_stops(self):
-        with providers(varied_places()) as calls:
-            body = self.assert_success(
-                post_json(COURSE_URL, trip(15, 260)), 3, 4,
-            )
-        self.assertEqual(len(body["course"]), 3)
-        self.assertLessEqual(calls["timeline"].call_count, MAX_COURSE_ATTEMPTS)
-
-    def test_four_hour_window_does_not_accept_initial_two_stop_course(self):
-        def only_two(*args, **kwargs):
-            return generate_course(*args, **kwargs)[:2]
-
-        with providers(varied_places()), patch("app.generate_course", side_effect=only_two):
-            body = self.assert_success(
-                post_json(COURSE_URL, trip(15, 260)), 3, 4,
-            )
-        self.assertEqual(len(body["course"]), 3)
-
-    def test_four_hour_window_returns_two_valid_stops_when_third_is_unavailable(self):
-        records = [place("a", "ACTIVITY"), place("c", "CAFE", 2)]
-        request = trip(15, 260, ("SEA", "CAFE"))
-        request["transportMode"] = "WALK"
-
-        def walk_route(mode, origin, destination, departure_at, cache=None):
-            self.assertEqual(mode, TransportMode.WALK)
-            return route_result_from_minutes(
-                mode=mode,
-                provider="TEST_WALK",
-                travel_minutes=10,
-                departure_at=departure_at,
-            )
-
-        with providers(records), patch(
-            "spontaneous.course.search_route", side_effect=walk_route,
-        ), self.assertLogs("data.app", level="INFO") as logs:
-            body = self.assert_success(
-                post_json(COURSE_URL, request), 2, 2,
-            )
-        self.assertEqual(body["transportMode"], "WALK")
-        self.assertEqual(len(body["course"]), 2)
-        summary = next(message for message in logs.output if "course search summary" in message)
-        for field in (
-            "onsiteMinutes=240", "targetMinStops=3", "targetMaxStops=4",
-            "selectedStopCount=2", "attemptCount=", "selectedStops=",
-            "failureReason=None", "rejectionReasons=", "preferredTargetMet=False",
-        ):
-            self.assertIn(field, summary)
-
-    def test_four_hour_window_still_rejects_a_single_stop_course(self):
-        with providers([place("a", "ACTIVITY")]):
-            self.assertEqual(
-                post_json(COURSE_URL, trip(15, 260, ("SEA",))),
-                (422, {"detail": "COURSE_NOT_FEASIBLE"}),
-            )
-
-    def test_first_unroutable_combination_uses_alternative_and_keeps_density(self):
-        records = [
-            place("a1", "ACTIVITY"),
-            place("a2", "ACTIVITY", 2),
-            place("m1", "MEAL", 3),
-            place("c1", "CAFE", 4),
-        ]
-        with providers(
-            records,
-            routing=lambda origin, destination, time: None if destination == "a1" else 10,
-        ) as calls:
-            body = self.assert_success(
-                post_json(COURSE_URL, trip(15, 260, ("SEA",))), 3, 4,
-            )
-        self.assertIn("a2", {stop["contentId"] for stop in body["course"]})
-        self.assertGreaterEqual(calls["timeline"].call_count, 2)
-
-    def test_seeded_course_selection_can_choose_different_valid_combinations(self):
-        records = (
-            [place(f"a{index}", "ACTIVITY", index) for index in range(1, 4)]
-            + [place(f"m{index}", "MEAL", index + 3) for index in range(1, 4)]
-            + [place(f"c{index}", "CAFE", index + 6) for index in range(1, 4)]
-        )
-        combinations = []
-        for seed in (1, 7):
-            with providers(records), patch(
-                "app.COURSE_RNG_FACTORY", side_effect=lambda seed=seed: Random(seed),
-            ):
-                body = self.assert_success(
-                    post_json(COURSE_URL, trip(15, 260, ("SEA",))), 3, 4,
-                )
-            combinations.append(tuple(stop["contentId"] for stop in body["course"]))
-        self.assertNotEqual(combinations[0], combinations[1])
-
-    def test_diversity_pool_never_promotes_low_quality_candidate(self):
-        leader = base_course_place(place("leader", "CAFE", 1))
-        peer = base_course_place(place("peer", "CAFE", 2))
-        low = base_course_place(place("low", "CAFE", 3))
-        low["latitude"] = START.latitude + 10
-        low["longitude"] = START.longitude + 10
-        for seed in range(20):
-            ordered = order_course_candidates(
-                [low, peer, leader], {"CAFE"}, "CAFE", START,
-                rng=Random(seed),
-            )
-            self.assertNotEqual(ordered[0]["contentId"], "low")
-
-    def test_missing_content_id_identity_normalizes_name_and_coordinates(self):
-        first = {"name": "  Same   Place ", "latitude": 35.1, "longitude": 129.1}
-        duplicate = {"title": "same place", "mapy": "35.1000001", "mapx": "129.1000001"}
-        self.assertEqual(get_place_identity(first), get_place_identity(duplicate))
-
-    def test_stop_policy_is_applied_for_every_transport_mode(self):
-        def route(mode, origin, destination, departure_at, cache=None):
-            return route_result_from_minutes(
-                mode=mode,
-                provider="TEST",
-                travel_minutes=10,
-                departure_at=departure_at,
-            )
-
-        for mode in TransportMode:
-            with self.subTest(mode=mode), providers(varied_places()), patch(
-                "spontaneous.course.search_route", side_effect=route,
-            ):
-                request = trip(15, 260)
-                request["transportMode"] = mode.value
-                body = self.assert_success(post_json(COURSE_URL, request), 3, 4)
-            self.assertLessEqual(len(body["course"]), 4)
-
-    def test_destination_transport_and_course_policy_share_onsite_boundary(self):
-        def route(mode, origin, destination, departure_at, cache=None):
-            return route_result_from_minutes(
-                mode=mode,
-                provider="TEST",
-                travel_minutes=10,
-                departure_at=departure_at,
-            )
-
-        destination = START.model_copy(update={
-            "latitude": START.latitude + 0.01,
-            "longitude": START.longitude + 0.01,
-        })
-        for onsite, expected in ((119, (1, 2)), (120, (2, 3)),
-                                 (239, (2, 3)), (240, (3, 4))):
-            with self.subTest(onsite=onsite), patch(
-                "spontaneous.routing.search_route", side_effect=route,
-            ):
-                transport = get_transport_option(
-                    START,
-                    destination,
-                    TransportMode.CAR,
-                    START_AT,
-                    START_AT + timedelta(minutes=onsite + 20),
-                )
-            self.assertTrue(transport.available)
-            self.assertEqual(transport.availableStayMinutes, onsite)
-            self.assertEqual(course_stop_range(transport.availableStayMinutes), expected)
-
-    def test_success_summary_log_contains_density_and_selection_context(self):
-        with providers(varied_places()), self.assertLogs("data.app", level="INFO") as logs:
-            self.assert_success(post_json(COURSE_URL, trip(15, 260)), 3, 4)
-        summary = next(message for message in logs.output if "course search summary" in message)
-        for field in (
-            "destinationId=", "transportMode=", "onsiteMinutes=240",
-            "targetMinStops=3", "targetMaxStops=4", "selectedStopCount=3",
-            "attemptCount=", "selectedStops=", "failureReason=None",
-            "rejectionReasons=",
-        ):
-            self.assertIn(field, summary)
-
-    def test_seven_hours_rejects_required_five_stop_course(self):
+    def test_seven_hours_can_cover_five_stops_when_activity_themes_need_two(self):
         records = varied_places() + [place("museum", "CULTURE", 5)]
         with providers(records):
-            self.assertEqual(
-                post_json(COURSE_URL, trip(15, 420, ("SEA", "CULTURE", "FOOD", "CAFE", "NIGHT_VIEW"))),
-                (422, {"detail": "COURSE_THEME_NOT_FEASIBLE"}),
-            )
+            body = self.assert_success(post_json(COURSE_URL, trip(15, 420, ("SEA", "CULTURE", "FOOD", "CAFE", "NIGHT_VIEW"))), 5, 5)
+        self.assertTrue({"SEA", "CULTURE", "FOOD", "CAFE", "NIGHT_VIEW"}.issubset(
+            {theme for stop in body["course"] for theme in stop["themes"]},
+        ))
 
     def test_short_trip_does_not_silently_drop_required_themes_to_meet_cap(self):
         with providers(varied_places()) as calls:
             self.assertEqual(post_json(COURSE_URL, trip(20, 90, ("SEA", "CAFE", "FOOD", "NIGHT_VIEW"))),
                              (422, {"detail": "COURSE_THEME_NOT_FEASIBLE"}))
-        # The onsite band is known only after exact outbound/return routing.
-        self.assertTrue(calls["routes"])
+        self.assertEqual(calls["routes"], [])
 
     def test_short_trip_can_trim_optional_stops_without_losing_requested_coverage(self):
         with providers(varied_places()):
@@ -273,21 +88,21 @@ class TimeAwareCourseTest(TestCase):
     def test_cafe_course_returns_200_in_afternoon_and_night_when_open(self):
         for hour in (15, 20):
             with self.subTest(hour=hour), providers([place("c")], hours={"c": "14:00~23:59"}) as calls:
-                body = self.assert_success(post_json(COURSE_URL, trip(hour, 120, ("CAFE",))))
+                body = self.assert_success(post_json(COURSE_URL, trip(hour, 180, ("CAFE",))))
                 self.assertEqual([stop["contentId"] for stop in body["course"]], ["c"])
                 self.assertEqual(calls["details"], ["c"])
                 self.assertEqual(len(calls["routes"]), 2)
 
     def test_late_night_cafe_supports_overnight_opening_hours(self):
         with providers([place("c")], hours={"c": "18:00~02:00"}):
-            body = self.assert_success(post_json(COURSE_URL, trip(23, 120, ("CAFE",))))
+            body = self.assert_success(post_json(COURSE_URL, trip(23, 180, ("CAFE",))))
         self.assertIn("CAFE", body["course"][0]["themes"])
 
     def test_night_cafe_fallback_rejects_closed_arrival_or_departure(self):
         cafe = place("closed")
         for hours in ("10:00~19:00", "20:00~20:30"):
             with self.subTest(hours=hours), providers([cafe, place("open", rank=2)], hours={"closed": hours}) as calls:
-                body = self.assert_success(post_json(COURSE_URL, trip(20, 120, ("CAFE",))))
+                body = self.assert_success(post_json(COURSE_URL, trip(20, 180, ("CAFE",))))
                 self.assertEqual([stop["contentId"] for stop in body["course"]], ["open"])
                 self.assertEqual(calls["timeline"].call_count, 2)
 
@@ -326,7 +141,7 @@ class TimeAwareCourseTest(TestCase):
             with self.subTest(hours=hours), providers(
                 [place("closed", "MEAL"), place("open", "MEAL", 2)], hours={"closed": hours},
             ) as calls:
-                body = self.assert_success(post_json(COURSE_URL, trip(20, 120)))
+                body = self.assert_success(post_json(COURSE_URL, trip(20, 180)))
             self.assertEqual([stop["contentId"] for stop in body["course"]], ["open"])
             self.assertEqual(calls["timeline"].call_count, 2)
 
@@ -375,7 +190,7 @@ class TimeAwareCourseTest(TestCase):
     def test_departure_sunset_and_actual_night_cafe_are_validated_at_arrival(self):
         with providers([place("c")], hours={"c": "19:00~23:00"},
                        routing=lambda origin, destination, time: 130 if origin == "home" else 10):
-            body = self.assert_success(post_json(COURSE_URL, trip(17, 250, ("CAFE",))))
+            body = self.assert_success(post_json(COURSE_URL, trip(17, 420, ("CAFE",))))
         self.assertEqual(resolve_time_profile(datetime.fromisoformat(body["course"][0]["arrivalAt"])), TimeProfile.NIGHT)
 
     def test_night_pool_limit_preserves_rare_required_theme(self):
@@ -403,7 +218,7 @@ class TimeAwareCourseTest(TestCase):
         self.assertEqual(len(attempts), len(set(attempts)))
 
     def test_night_cafe_utc_and_korea_inputs_have_equivalent_visits(self):
-        local = trip(20, 120, ("CAFE",))
+        local = trip(20, 180, ("CAFE",))
         utc = {**local, **{key: datetime.fromisoformat(local[key]).astimezone(timezone.utc).isoformat()
                           for key in ("startAt", "returnBy")}}
         with providers([place("c")], hours={"c": "20:00~23:00"}):
@@ -415,7 +230,7 @@ class TimeAwareCourseTest(TestCase):
 
     def test_course_logs_profile_and_returns_preview_fields(self):
         with providers([place("c")]), self.assertLogs("data.app", level="INFO") as logs:
-            body = self.assert_success(post_json(COURSE_URL, trip(20, 120, ("CAFE",))))
+            body = self.assert_success(post_json(COURSE_URL, trip(20, 180, ("CAFE",))))
         message = "\n".join(logs.output)
         self.assertIn("timeProfile=NIGHT", message)
         self.assertIn("stops=1", message)

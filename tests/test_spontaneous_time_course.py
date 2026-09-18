@@ -11,10 +11,7 @@ from spontaneous.course import (
     order_course_candidates,
     place_ranking_key,
 )
-from spontaneous.course_policy import (
-    calculate_onsite_minutes,
-    minimum_acceptable_course_stops,
-)
+from spontaneous.course_policy import calculate_onsite_minutes
 from spontaneous.models import TransportMode
 from spontaneous.places import base_course_place
 from spontaneous.planner import CourseCandidateSearch, MAX_CANDIDATES_PER_ROLE, MAX_COURSE_ATTEMPTS, rank_course_candidates
@@ -80,10 +77,6 @@ class TimeAwareCourseTest(TestCase):
             self.assertEqual(onsite, minutes)
             self.assertEqual(course_stop_range(minutes), expected)
 
-    def test_hard_minimum_allows_a_smaller_valid_fallback(self):
-        for minutes, expected in ((119, 1), (120, 1), (239, 1), (240, 2), (420, 2)):
-            self.assertEqual(minimum_acceptable_course_stops(minutes), expected)
-
     def test_four_hour_onsite_window_builds_three_or_four_stops(self):
         with providers(varied_places()) as calls:
             body = self.assert_success(
@@ -102,42 +95,18 @@ class TimeAwareCourseTest(TestCase):
             )
         self.assertEqual(len(body["course"]), 3)
 
-    def test_four_hour_window_returns_two_valid_stops_when_third_is_unavailable(self):
+    def test_four_hour_window_fails_when_no_valid_third_stop_exists(self):
         records = [place("a", "ACTIVITY"), place("c", "CAFE", 2)]
-        request = trip(15, 260, ("SEA", "CAFE"))
-        request["transportMode"] = "WALK"
-
-        def walk_route(mode, origin, destination, departure_at, cache=None):
-            self.assertEqual(mode, TransportMode.WALK)
-            return route_result_from_minutes(
-                mode=mode,
-                provider="TEST_WALK",
-                travel_minutes=10,
-                departure_at=departure_at,
-            )
-
-        with providers(records), patch(
-            "spontaneous.course.search_route", side_effect=walk_route,
-        ), self.assertLogs("data.app", level="INFO") as logs:
-            body = self.assert_success(
-                post_json(COURSE_URL, request), 2, 2,
-            )
-        self.assertEqual(body["transportMode"], "WALK")
-        self.assertEqual(len(body["course"]), 2)
-        summary = next(message for message in logs.output if "course search summary" in message)
+        with providers(records), self.assertLogs("data.app", level="INFO") as logs:
+            response = post_json(COURSE_URL, trip(15, 260, ("SEA", "CAFE")))
+        self.assertEqual(response, (422, {"detail": "COURSE_NOT_FEASIBLE"}))
+        summary = next(message for message in logs.output if "course search finished" in message)
         for field in (
             "onsiteMinutes=240", "targetMinStops=3", "targetMaxStops=4",
             "selectedStopCount=2", "attemptCount=", "selectedStops=",
-            "failureReason=None", "rejectionReasons=", "preferredTargetMet=False",
+            "failureReason=COURSE_NOT_FEASIBLE", "rejectionReasons=",
         ):
             self.assertIn(field, summary)
-
-    def test_four_hour_window_still_rejects_a_single_stop_course(self):
-        with providers([place("a", "ACTIVITY")]):
-            self.assertEqual(
-                post_json(COURSE_URL, trip(15, 260, ("SEA",))),
-                (422, {"detail": "COURSE_NOT_FEASIBLE"}),
-            )
 
     def test_first_unroutable_combination_uses_alternative_and_keeps_density(self):
         records = [

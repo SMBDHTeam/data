@@ -110,7 +110,6 @@ from spontaneous.course_policy import (
     MAX_COURSE_STOPS,
     calculate_onsite_minutes,
     course_stop_range,
-    minimum_acceptable_course_stops,
 )
 from spontaneous.time_profile import DESTINATION_FINAL_TIME_SCALE, resolve_time_profile
 from spontaneous.time_window import SpontaneousTimeWindowError, validate_spontaneous_time_window
@@ -775,13 +774,11 @@ def recommend_spontaneous_destinations(
                 )
             continue
 
-        minimum_stops = minimum_acceptable_course_stops(
-            transport.availableStayMinutes
-        )
+        target_min_stops, _ = course_stop_range(transport.availableStayMinutes)
         if not has_coarse_course_capacity(
             candidate["_places"],
             request.desiredThemes,
-            minimum_stops,
+            target_min_stops,
         ):
             unavailable_reasons.append("INSUFFICIENT_COURSE_PLACES")
             continue
@@ -1035,7 +1032,6 @@ def create_spontaneous_course(
     routing_cache = {}
     last_failure_reason = "COURSE_NOT_FEASIBLE"
     failure_reason_counts = Counter()
-    best_fallback = None
 
     def attempt_failed(reason, failed_index=None):
         nonlocal last_failure_reason
@@ -1058,74 +1054,6 @@ def create_spontaneous_course(
             [item.get("contentId") for item in course], reason,
             failed_role, stop.get("contentId"), request.transportMode.value,
         )
-
-    def complete_course(
-        timeline,
-        selected_onsite_minutes,
-        preferred_min_stops,
-        selected_max_stops,
-        preferred_target_met,
-    ):
-        enrich_course_place_images(
-            timeline["course"],
-            image_cache=image_cache,
-            related_places=regional_places,
-        )
-        log.info(
-            "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, "
-            "returnMinutes=%s, elapsedMs=%d, startAt=%s, timeProfile=%s, "
-            "preferredTargetMet=%s",
-            request.destinationId,
-            request.transportMode,
-            len(timeline["course"]),
-            timeline["returnTravelMinutes"],
-            int((monotonic() - started_at) * 1000),
-            request.startAt.isoformat(),
-            time_profile.value if time_profile else None,
-            preferred_target_met,
-        )
-        log.info(
-            "spontaneous course search summary. destinationId=%s "
-            "transportMode=%s onsiteMinutes=%s targetMinStops=%s "
-            "targetMaxStops=%s selectedStopCount=%s attemptCount=%s "
-            "selectedStops=%s failureReason=%s rejectionReasons=%s "
-            "preferredTargetMet=%s",
-            zone.destination_id,
-            request.transportMode.value,
-            selected_onsite_minutes,
-            preferred_min_stops,
-            selected_max_stops,
-            len(timeline["course"]),
-            search.attempts,
-            [
-                {"role": item.get("role"), "contentId": item.get("contentId")}
-                for item in timeline["course"]
-            ],
-            None,
-            dict(sorted(failure_reason_counts.items())),
-            preferred_target_met,
-        )
-
-        snapshot = build_course_snapshot(request, zone, timeline)
-        preview_id, preview_token, preview_expires_at = create_preview_token(
-            snapshot, auth_user_id
-        )
-        return {
-            "destinationId": zone.destination_id,
-            "name": zone.name,
-            "transportMode": request.transportMode.value,
-            "returnTravelMinutes": timeline["returnTravelMinutes"],
-            "estimatedReturnAt": timeline["estimatedReturnAt"].isoformat(),
-            "returnBy": request.returnBy.isoformat(),
-            "previewId": preview_id,
-            "previewToken": preview_token,
-            "previewExpiresAt": preview_expires_at,
-            "startLocation": request.startLocation,
-            "startAt": request.startAt,
-            "course": public_preview_course(snapshot),
-            "finalTransit": timeline["finalTransit"],
-            "routeLines": public_preview_route_lines(snapshot),
-        }
 
     previous_course = []
     while (candidate := search.next_course()) is not None:
@@ -1213,32 +1141,7 @@ def create_spontaneous_course(
         )
         target_min_stops, target_max_stops = course_stop_range(onsite_minutes)
 
-        if len(timeline["course"]) > target_max_stops:
-            attempt_failed("STOP_LIMIT_EXCEEDED")
-            search.retry(course, last_failure_reason, timeline=timeline["course"])
-            continue
-
-        if estimated_return_at > request.returnBy:
-            attempt_failed("RETURN_TIME_EXCEEDED")
-            search.retry(course, last_failure_reason, timeline=timeline["course"])
-            continue
-
         if len(timeline["course"]) < target_min_stops:
-            acceptable_minimum = minimum_acceptable_course_stops(onsite_minutes)
-            if len(timeline["course"]) >= acceptable_minimum:
-                fallback_score = (
-                    len(timeline["course"]),
-                    -estimated_return_at.timestamp(),
-                )
-                if best_fallback is None or fallback_score > best_fallback["score"]:
-                    best_fallback = {
-                        "score": fallback_score,
-                        "timeline": timeline,
-                        "onsite_minutes": onsite_minutes,
-                        "target_min_stops": target_min_stops,
-                        "target_max_stops": target_max_stops,
-                    }
-
             attempt_failed("STOP_COUNT_BELOW_MINIMUM")
             search.retry(
                 course,
@@ -1248,22 +1151,72 @@ def create_spontaneous_course(
             )
             continue
 
-        return complete_course(
-            timeline,
-            onsite_minutes,
-            target_min_stops,
-            target_max_stops,
-            preferred_target_met=True,
-        )
+        if len(timeline["course"]) > target_max_stops:
+            attempt_failed("STOP_LIMIT_EXCEEDED")
+            search.retry(course, last_failure_reason, timeline=timeline["course"])
+            continue
 
-    if best_fallback is not None:
-        return complete_course(
-            best_fallback["timeline"],
-            best_fallback["onsite_minutes"],
-            best_fallback["target_min_stops"],
-            best_fallback["target_max_stops"],
-            preferred_target_met=False,
-        )
+        if estimated_return_at <= request.returnBy:
+            enrich_course_place_images(
+                timeline["course"],
+                image_cache=image_cache,
+                related_places=regional_places,
+            )
+            log.info(
+                "spontaneous course created. destinationId=%s, transportMode=%s, stops=%s, "
+                "returnMinutes=%s, elapsedMs=%d, startAt=%s, timeProfile=%s",
+                request.destinationId,
+                request.transportMode,
+                len(timeline["course"]),
+                timeline["returnTravelMinutes"],
+                int((monotonic() - started_at) * 1000),
+                request.startAt.isoformat(), time_profile.value if time_profile else None,
+            )
+            log.info(
+                "spontaneous course search summary. destinationId=%s "
+                "transportMode=%s onsiteMinutes=%s targetMinStops=%s "
+                "targetMaxStops=%s selectedStopCount=%s attemptCount=%s "
+                "selectedStops=%s failureReason=%s rejectionReasons=%s",
+                zone.destination_id,
+                request.transportMode.value,
+                onsite_minutes,
+                target_min_stops,
+                target_max_stops,
+                len(timeline["course"]),
+                search.attempts,
+                [
+                    {"role": item.get("role"), "contentId": item.get("contentId")}
+                    for item in timeline["course"]
+                ],
+                None,
+                dict(sorted(failure_reason_counts.items())),
+            )
+
+            snapshot = build_course_snapshot(request, zone, timeline)
+            preview_id, preview_token, preview_expires_at = create_preview_token(
+                snapshot, auth_user_id
+            )
+            return {
+                "destinationId": zone.destination_id,
+                "name": zone.name,
+                "transportMode": request.transportMode.value,
+                "returnTravelMinutes": timeline[
+                    "returnTravelMinutes"
+                ],
+                "estimatedReturnAt": estimated_return_at.isoformat(),
+                "returnBy": request.returnBy.isoformat(),
+                "previewId": preview_id,
+                "previewToken": preview_token,
+                "previewExpiresAt": preview_expires_at,
+                "startLocation": request.startLocation,
+                "startAt": request.startAt,
+                "course": public_preview_course(snapshot),
+                "finalTransit": timeline["finalTransit"],
+                "routeLines": public_preview_route_lines(snapshot),
+            }
+
+        attempt_failed("RETURN_TIME_EXCEEDED")
+        search.retry(course, last_failure_reason, timeline=timeline["course"])
 
     final_failure_reason = resolve_course_failure_detail(failure_reason_counts)
     log.info(

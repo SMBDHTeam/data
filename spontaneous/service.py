@@ -9,7 +9,6 @@ from spontaneous.course import (
     can_cover_required_themes_for_role,
     get_required_roles,
     get_required_themes_by_role,
-    get_place_identity,
     group_places_by_role,
     has_required_theme_coverage,
 )
@@ -160,38 +159,6 @@ def has_coarse_course_viability(
         coarse_places,
         desired_set,
     )
-
-
-def has_coarse_course_capacity(
-    places: list[dict],
-    desired_themes: list[str],
-    minimum_stops: int,
-) -> bool:
-    """Conservative no-routing check for the destination card's stop target."""
-    if not has_coarse_course_viability(places, desired_themes):
-        return False
-
-    unique_places = {}
-    for place in filter_course_candidates(places):
-        coarse = coarse_course_place(place)
-        unique_places.setdefault(get_place_identity(coarse), coarse)
-
-    grouped = group_places_by_role(list(unique_places.values()))
-    required_themes = get_required_themes_by_role({
-        theme.value if hasattr(theme, "value") else str(theme).upper()
-        for theme in desired_themes
-    })
-    # Prefer distinct roles; allow one repeat when the destination has depth in
-    # that role. More repeats are counted only when distinct requested themes
-    # require them (for example, several ACTIVITY themes).
-    balanced_capacity = sum(
-        min(
-            max(2, len(required_themes.get(role, set()))),
-            len(role_places),
-        )
-        for role, role_places in grouped.items()
-    )
-    return balanced_capacity >= minimum_stops
 
 
 def calculate_zone_theme_score(

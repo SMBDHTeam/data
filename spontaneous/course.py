@@ -1,15 +1,9 @@
-import random
 from datetime import datetime, timedelta
 from typing import Set
 from math import asin, cos, radians, sin, sqrt
 
 from spontaneous.models import Coordinate, TransportMode
 from spontaneous.places import SEAFOOD_MENU_KEYWORDS
-from spontaneous.course_policy import (
-    COURSE_STOP_POLICY,
-    MAX_COURSE_STOPS,
-    course_stop_range,
-)
 from spontaneous.time_profile import calculate_time_fit_bonus, resolve_time_profile
 from spontaneous.routing import (
     RouteResult,
@@ -77,11 +71,17 @@ ACTIVITY_ROLE_THEMES = {
     "SHOPPING",
 }
 MIN_OPTIONAL_ROLE_BUFFER_MINUTES = 30
-DIVERSITY_POOL_LIMIT = 3
-DIVERSITY_MIN_QUALITY_RATIO = 0.85
+# Soft target ranges; availability, requested coverage and returnBy take priority
+# over the lower bound. The upper bound applies to every successful course.
+COURSE_STOP_POLICY = ((120, 1, 2), (240, 2, 3), (360, 3, 4), (None, 4, 5))
 # Straight-line estimates are used ONLY for ranking, never as route results or
 # feasibility evidence. The provider timeline remains authoritative.
 RANKING_SPEED_KMH = {TransportMode.WALK: 4, TransportMode.PUBLIC_TRANSIT: 18, TransportMode.CAR: 30}
+
+
+def course_stop_range(available_minutes: int) -> tuple[int, int]:
+    return next((minimum, maximum) for upper, minimum, maximum in COURSE_STOP_POLICY
+                if upper is None or available_minutes < upper)
 
 
 def limit_optional_course_stops(course: list[dict], maximum: int | None) -> list[dict]:
@@ -471,7 +471,6 @@ def select_best_place(
     selected_place_keys: set[tuple] | None = None,
     departure_at: datetime | None = None,
     transport_mode: TransportMode | None = None,
-    rng: random.Random | None = None,
 ) -> dict | None:
     """
     역할별 후보 중
@@ -515,78 +514,17 @@ def select_best_place(
             if partially_matched:
                 candidates = partially_matched
 
-    return order_course_candidates(
+    return sorted(
         candidates,
-        desired_themes,
-        role,
-        current_location,
-        required_themes=required_themes,
-        departure_at=departure_at,
-        transport_mode=transport_mode,
-        rng=rng,
-    )[0]
-
-
-def order_course_candidates(
-    candidates: list[dict],
-    desired_themes: set[str],
-    role: str,
-    current_location,
-    *,
-    required_themes: set[str] | None = None,
-    departure_at: datetime | None = None,
-    transport_mode: TransportMode | None = None,
-    visit_at: datetime | None = None,
-    rng: random.Random | None = None,
-) -> list[dict]:
-    """Rank all candidates, then vary only a small comparable-quality prefix."""
-    ranking = lambda place: place_ranking_key(
+        key=lambda place: place_ranking_key(
             place,
             desired_themes,
             role,
             current_location,
-            remaining_themes=required_themes,
             departure_at=departure_at,
             transport_mode=transport_mode,
-            visit_at=visit_at,
-        )
-    ranked = sorted(candidates, key=ranking)
-    if rng is None or len(ranked) < 2:
-        return ranked
-
-    leader_key = ranking(ranked[0])
-    leader_score = calculate_place_score(
-        ranked[0], desired_themes, role, current_location,
-    )
-    quality_floor = leader_score * DIVERSITY_MIN_QUALITY_RATIO
-    pool = []
-    for candidate in ranked[:DIVERSITY_POOL_LIMIT]:
-        candidate_key = ranking(candidate)
-        candidate_score = calculate_place_score(
-            candidate, desired_themes, role, current_location,
-        )
-        # Never trade required-theme coverage for variety. Within the same
-        # coverage tier, keep only candidates close to the leader's score.
-        if candidate_key[0] != leader_key[0] or candidate_score < quality_floor:
-            break
-        pool.append(candidate)
-
-    if len(pool) < 2:
-        return ranked
-
-    diversified = []
-    remaining = list(pool)
-    original_rank = {id(candidate): index for index, candidate in enumerate(pool)}
-    while remaining:
-        weights = [
-            (len(pool) - original_rank[id(candidate)]) ** 2
-            for candidate in remaining
-        ]
-        selected_index = rng.choices(range(len(remaining)), weights=weights, k=1)[0]
-        diversified.append(remaining.pop(selected_index))
-
-    pool_ids = {id(candidate) for candidate in pool}
-    return diversified + [candidate for candidate in ranked if id(candidate) not in pool_ids]
+        ),
+    )[0]
 
 
 def get_place_identity(
@@ -619,15 +557,18 @@ def get_place_identity(
         latitude_key = str(latitude or "")
         longitude_key = str(longitude or "")
 
-    normalized_name = " ".join(str(
-        place.get("name")
-        or place.get("title")
-        or ""
-    ).casefold().split())
-
     return (
         "place",
-        normalized_name,
+        str(
+            place.get("contentTypeId")
+            or place.get("contenttypeid")
+            or ""
+        ),
+        str(
+            place.get("name")
+            or place.get("title")
+            or ""
+        ).strip(),
         latitude_key,
         longitude_key,
     )
@@ -720,7 +661,6 @@ def select_best_covering_place(
     selected_place_keys: set[tuple],
     departure_at: datetime | None = None,
     transport_mode: TransportMode | None = None,
-    rng: random.Random | None = None,
 ) -> dict | None:
     candidates = [
         place
@@ -734,15 +674,17 @@ def select_best_covering_place(
     if not candidates:
         return None
 
-    return order_course_candidates(
+    return sorted(
         candidates,
-        desired_themes,
-        role,
-        current_location,
-        required_themes=remaining_themes,
-        departure_at=departure_at,
-        transport_mode=transport_mode,
-        rng=rng,
+        key=lambda place: place_ranking_key(
+            place,
+            desired_themes,
+            role,
+            current_location,
+            remaining_themes=remaining_themes,
+            departure_at=departure_at,
+            transport_mode=transport_mode,
+        ),
     )[0]
 
 
@@ -809,7 +751,7 @@ def build_course_role_plan(
     plan: list[tuple[str, int]] = []
     planned_roles: set[str] = set()
     remaining_minutes = available_minutes
-    maximum = MAX_COURSE_STOPS
+    maximum = course_stop_range(available_minutes)[1] if available_minutes is not None else None
 
     def append_role(
         role: str,
@@ -1065,7 +1007,6 @@ def generate_course(
     start_at: datetime | None = None,
     transport_mode: TransportMode | None = None,
     max_stops: int | None = None,
-    rng: random.Random | None = None,
 ) -> list[dict]:
     """
     코스 생성
@@ -1143,7 +1084,6 @@ def generate_course(
                     selected_place_keys,
                     departure_at=cursor_time,
                     transport_mode=transport_mode,
-                    rng=rng,
                 )
 
                 if not selected:
@@ -1192,7 +1132,6 @@ def generate_course(
             selected_place_keys=selected_place_keys,
             departure_at=cursor_time,
             transport_mode=transport_mode,
-            rng=rng,
         )
 
         if not selected:

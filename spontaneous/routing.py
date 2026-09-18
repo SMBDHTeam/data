@@ -16,7 +16,6 @@ from spontaneous.models import (
     TransportMode,
     TransportOption,
 )
-from spontaneous.course_policy import calculate_onsite_minutes
 
 MIN_STAY_MINUTES = 60
 log = logging.getLogger("data.spontaneous.routing")
@@ -2093,6 +2092,10 @@ def get_transport_option(
     return_by: datetime,
     cache: RouteResultCache | None = None,
 ) -> TransportOption:
+    total_available_minutes = int(
+        (return_by - start_at).total_seconds() // 60
+    )
+
     try:
         outbound_route = search_route(
             mode,
@@ -2135,11 +2138,10 @@ def get_transport_option(
             unavailableReason="NO_ROUTE",
         )
 
-    available_stay_minutes = calculate_onsite_minutes(
-        start_at,
-        return_by,
-        outbound_route.travelMinutes,
-        return_route.travelMinutes,
+    available_stay_minutes = (
+        total_available_minutes
+        - outbound_route.travelMinutes
+        - return_route.travelMinutes
     )
 
     if available_stay_minutes < MIN_STAY_MINUTES:

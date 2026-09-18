@@ -99,7 +99,6 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
             filter_course_candidates=lambda places: places,
             calculate_zone_theme_score=lambda places, desired_themes: 1.0,
             has_coarse_course_viability=lambda places, desired_themes: True,
-            has_coarse_course_capacity=lambda places, desired_themes, minimum_stops: True,
             calculate_destination_score=lambda zone, start_location, theme_score: (
                 100.0 - zone_number(zone),
                 theme_score,

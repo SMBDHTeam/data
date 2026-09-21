@@ -189,6 +189,13 @@ def odsay_path_to_models(
         line_name = line_name_for(sub_path)
         start_name = first_text(sub_path, "startName", "startStationName") or origin.name
         end_name = first_text(sub_path, "endName", "endStationName") or destination.name
+        if mode == "WALK":
+            start_name, end_name = walk_segment_names(
+                sub_paths,
+                index - 1,
+                origin.name,
+                destination.name,
+            )
         duration_minutes = int_value(sub_path, "sectionTime")
         distance = first_int(sub_path, "distance", "sectionDistance")
         segment = ScheduleSegment(
@@ -211,13 +218,18 @@ def odsay_path_to_models(
         coordinates = coordinate_pairs_from_sub_path(sub_path)
         fallback_used = False
         if mode == "WALK":
-            line_start = coordinates[0] if coordinates else previous_line_end
-            line_end = coordinates[-1] if coordinates else coordinates_from_name(end_name, destination, origin, use_destination=True)
-            tmap_route = find_tmap_walking_route_if_enabled(
-                TransitPoint(start_name, line_start[0], line_start[1]),
-                TransitPoint(end_name, line_end[0], line_end[1]),
-                distance,
-            )
+            # ODSAY walking subpaths often omit coordinates. Do not synthesize
+            # origin/destination coordinates and ask TMAP to recalculate them:
+            # that turns a short access walk into the full trip's walking time.
+            tmap_route = None
+            if len(coordinates) >= 2:
+                line_start = coordinates[0]
+                line_end = coordinates[-1]
+                tmap_route = find_tmap_walking_route_if_enabled(
+                    TransitPoint(start_name, line_start[0], line_start[1]),
+                    TransitPoint(end_name, line_end[0], line_end[1]),
+                    distance,
+                )
             if tmap_route is not None:
                 coordinates = tmap_route.coordinates
                 distance = tmap_route.distance_meters
@@ -641,6 +653,27 @@ def first_text(source: dict[str, Any], *keys: str) -> str | None:
         if value is not None and str(value).strip():
             return str(value)
     return None
+
+
+def walk_segment_names(
+    sub_paths: list[dict[str, Any]],
+    index: int,
+    origin_name: str,
+    destination_name: str,
+) -> tuple[str, str]:
+    previous = sub_paths[index - 1] if index > 0 else {}
+    following = sub_paths[index + 1] if index + 1 < len(sub_paths) else {}
+    start_name = (
+        first_text(previous, "endName", "endStationName")
+        if previous
+        else origin_name
+    ) or origin_name
+    end_name = (
+        first_text(following, "startName", "startStationName")
+        if following
+        else destination_name
+    ) or destination_name
+    return start_name, end_name
 
 
 def map_mode(traffic_type: int) -> str:

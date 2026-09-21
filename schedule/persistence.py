@@ -969,6 +969,24 @@ def load_schedule(schedule_id: UUID) -> ScheduleResponse:
     return items[0]
 
 
+def delete_schedule(schedule_id: UUID, user_id: int | None = None) -> None:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            if user_id is None:
+                cur.execute("SELECT id FROM schedules WHERE id = %s", (schedule_id,))
+            else:
+                cur.execute(
+                    "SELECT id FROM schedules WHERE id = %s AND user_id = %s",
+                    (schedule_id, user_id),
+                )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Schedule not found")
+
+            delete_schedule_children(cur, schedule_id)
+            cur.execute("DELETE FROM schedules WHERE id = %s", (schedule_id,))
+        conn.commit()
+
+
 def list_schedules(user_id: int | None = None) -> ScheduleListResponse:
     """일정 목록.
 

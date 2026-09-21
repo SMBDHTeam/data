@@ -13,6 +13,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, Header, HTTPException
+from fastapi import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.runtime_env import load_runtime_env
@@ -41,6 +42,7 @@ from schedule.service import (
     current_candidate_pool_source,
     db_runtime_status,
     create_schedule,
+    delete_schedule,
     get_schedule,
     get_schedule_map,
     list_schedules,
@@ -607,6 +609,15 @@ def list_schedules_endpoint(userId: int | None = None) -> ScheduleListResponse:
 @app.get("/api/v1/schedules/{schedule_id}", response_model=ScheduleResponse)
 def get_schedule_endpoint(schedule_id: UUID) -> ScheduleResponse:
     return get_schedule(schedule_id)
+
+
+@app.delete("/api/v1/schedules/{schedule_id}", status_code=204)
+def delete_schedule_endpoint(
+    schedule_id: UUID,
+    auth_user_id: int | None = Header(default=None, alias="X-Auth-User-Id"),
+) -> Response:
+    delete_schedule(schedule_id, auth_user_id)
+    return Response(status_code=204)
 
 
 @app.patch("/api/v1/schedules/{schedule_id}", response_model=ScheduleResponse)

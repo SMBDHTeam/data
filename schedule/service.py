@@ -39,6 +39,7 @@ from schedule.models import (
 )
 from schedule.persistence import (
     db_enabled,
+    delete_schedule as delete_schedule_from_db,
     list_schedules as list_schedules_from_db,
     load_schedule as load_schedule_from_db,
     save_schedule as save_schedule_to_db,
@@ -497,6 +498,11 @@ class ScheduleStore:
         if schedule is None:
             raise HTTPException(status_code=404, detail="Schedule not found")
         return schedule
+
+    def delete(self, schedule_id: UUID) -> None:
+        with self._lock:
+            if self._items.pop(schedule_id, None) is None:
+                raise HTTPException(status_code=404, detail="Schedule not found")
 
 
 STORE = ScheduleStore()

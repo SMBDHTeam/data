@@ -243,7 +243,7 @@ def collect_warnings(request: SchedulePreviewCreateRequest) -> list[PreviewWarni
         PreviewWarning(
             code="FASTAPI_PREVIEW_MIGRATION",
             date=None,
-            message="입력한 여행 조건을 바탕으로 미리보기 일정을 구성했습니다.",
+            message="선택한 날짜, 출발지, 여행 취향을 바탕으로 미리보기 일정을 구성했습니다.",
         )
     ]
     if request.fixed_events:

@@ -39,11 +39,12 @@ from schedule.models import (
 )
 from schedule.persistence import (
     db_enabled,
+    delete_schedule as delete_schedule_from_db,
     list_schedules as list_schedules_from_db,
     load_schedule as load_schedule_from_db,
     save_schedule as save_schedule_to_db,
 )
-from transit.routing import TransitPoint, find_route
+from transit.routing import TransitPoint, find_route, unresolved_public_transit
 
 load_runtime_env()
 log = logging.getLogger("data.schedule.service")
@@ -498,6 +499,11 @@ class ScheduleStore:
             raise HTTPException(status_code=404, detail="Schedule not found")
         return schedule
 
+    def delete(self, schedule_id: UUID) -> None:
+        with self._lock:
+            if self._items.pop(schedule_id, None) is None:
+                raise HTTPException(status_code=404, detail="Schedule not found")
+
 
 STORE = ScheduleStore()
 
@@ -626,6 +632,20 @@ def get_schedule(schedule_id: UUID) -> ScheduleResponse:
         except Exception:
             log.exception("schedule get db load failed. scheduleId=%s", schedule_id)
     return STORE.get(schedule_id)
+
+
+def delete_schedule(schedule_id: UUID, user_id: int | None = None) -> None:
+    if db_enabled():
+        try:
+            delete_schedule_from_db(schedule_id, user_id)
+            log.info("schedule deleted. scheduleId=%s, userId=%s", schedule_id, user_id)
+            return
+        except HTTPException:
+            raise
+        except Exception:
+            log.exception("schedule delete db failed. scheduleId=%s, userId=%s", schedule_id, user_id)
+            raise HTTPException(status_code=503, detail="Schedule delete unavailable")
+    STORE.delete(schedule_id)
 
 
 def update_schedule(schedule_id: UUID, request: ScheduleUpdateRequest) -> ScheduleResponse:
@@ -1418,23 +1438,23 @@ def build_inbound_transit(origin_name: str | None, destination_name: str, transi
     if origin_name is None:
         return None
     return ScheduleTransit(
-        routeType="WALK",
+        routeType="INBOUND",
         routeOrder=0,
         originName=origin_name,
         destinationName=destination_name,
-        summary=f"{origin_name} -> {destination_name}",
+        summary="대중교통 경로 확인 필요",
         departAt=None,
         arriveAt=None,
         totalMinutes=transit_minutes,
-        walkMinutes=transit_minutes,
+        walkMinutes=0,
         waitMinutes=0,
         transferCount=0,
         fareAmount=None,
-        provider=None,
+        provider="UNRESOLVED",
         realtimeStatus="UNAVAILABLE",
         fallbackUsed=True,
         segments=[],
-        warnings=["일부 이동 시간은 직선 거리 기반 추정치가 사용되었습니다."],
+        warnings=["대중교통 경로를 계산하지 못했습니다. 실제 이동수단과 소요 시간을 확인해 주세요."],
     )
 
 
@@ -1641,11 +1661,14 @@ def resolve_transit(
             destination.longitude,
             destination.latitude,
         )
-        fallback = build_inbound_transit(origin.name, destination.name, minutes)
-        if fallback is None:
-            raise
-        fallback.route_type = route_type
-        fallback.route_order = route_order
+        fallback = unresolved_public_transit(
+            origin,
+            destination,
+            route_type,
+            route_order,
+            total_minutes=minutes,
+            distance_meters=0,
+        )
         if cache is not None:
             cache[key] = clone_transit_for_route(fallback, route_type, route_order)
         return fallback

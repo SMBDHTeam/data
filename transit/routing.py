@@ -123,7 +123,7 @@ def find_route(
         transit = tmap_walk_transit(origin, destination, route_type, route_order, tmap_route)
         return transit, tmap_route_lines(origin, destination, transit, tmap_route)
 
-    transit = walk_fallback_transit(
+    transit = unresolved_public_transit(
         origin,
         destination,
         route_type,
@@ -132,7 +132,7 @@ def find_route(
         distance_meters=int(round(walk_distance)),
     )
     logger.info(
-        "transit fallback=estimated_walk route_type=%s route_order=%s origin=%s destination=%s distance_meters=%s total_minutes=%s",
+        "transit fallback=unresolved_public route_type=%s route_order=%s origin=%s destination=%s distance_meters=%s total_minutes=%s",
         route_type,
         route_order,
         origin.name,
@@ -140,7 +140,7 @@ def find_route(
         int(round(walk_distance)),
         transit.total_minutes,
     )
-    return transit, direct_route_lines(origin, destination, transit)
+    return transit, []
 
 
 def search_odsay_path(origin: TransitPoint, destination: TransitPoint, api_key: str) -> dict[str, Any]:
@@ -319,6 +319,36 @@ def walk_fallback_transit(
             )
         ],
         warnings=[],
+    )
+
+
+def unresolved_public_transit(
+    origin: TransitPoint,
+    destination: TransitPoint,
+    route_type: str,
+    route_order: int,
+    total_minutes: int,
+    distance_meters: int,
+) -> ScheduleTransit:
+    return ScheduleTransit(
+        routeType=route_type,
+        routeOrder=route_order,
+        originName=origin.name,
+        destinationName=destination.name,
+        summary="대중교통 경로 확인 필요",
+        totalMinutes=total_minutes,
+        walkMinutes=0,
+        waitMinutes=0,
+        transferCount=0,
+        fareAmount=None,
+        provider="UNRESOLVED",
+        realtimeStatus="UNAVAILABLE",
+        fallbackUsed=True,
+        segments=[],
+        warnings=[
+            "대중교통 경로를 계산하지 못했습니다. 실제 이동수단과 소요 시간을 확인해 주세요.",
+        ],
+        route_lines=[],
     )
 
 

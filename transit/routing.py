@@ -118,11 +118,9 @@ def find_route(
             bool(odsay_api_key),
         )
 
-    tmap_route = find_tmap_walking_route_if_enabled(origin, destination, int(round(walk_distance)))
-    if tmap_route is not None:
-        transit = tmap_walk_transit(origin, destination, route_type, route_order, tmap_route)
-        return transit, tmap_route_lines(origin, destination, transit, tmap_route)
-
+    # Long-distance legs must not fall back to TMAP walking when public transit
+    # lookup is unavailable. Doing so turns a routing failure into an implausible
+    # multi-hour walking recommendation.
     transit = unresolved_public_transit(
         origin,
         destination,

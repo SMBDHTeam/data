@@ -36,14 +36,14 @@ class TmapTransitErrorTest(TestCase):
                 self.assertEqual(error.exception.provider, "TMAP_TRANSIT")
                 self.assertEqual(error.exception.status_code, 503 if status == 429 else 502)
                 self.assertEqual(error.exception.detail,
-                                 "TMAP_QUOTA_EXCEEDED" if status == 429 else "EXTERNAL_ROUTING_API_ERROR")
+                                  "TMAP_QUOTA_EXCEEDED" if status == 429 else "EXTERNAL_ROUTING_API_ERROR")
                 self.assertEqual(http.call_count, 1)
 
-    def test_destination_endpoint_preserves_quota_detail_and_two_candidate_limit(self):
+    def test_odsay_destination_endpoint_preserves_quota_detail_and_two_candidate_limit(self):
         for status in (429, 500):
             with (
                 self.subTest(status=status),
-                patch.dict("os.environ", {"SKT_API_KEY": "test-key"}),
+                patch.dict("os.environ", {"ODSAY_ENABLED": "true", "ODSAY_API_KEY": "test-key"}),
                 patch("app.search_places_by_zone", side_effect=lambda zone, places_cache=None:
                       TOURAPI_PLACES_BY_ZONE[zone.destination_id]),
                 patch("spontaneous.service.random", Random(42)),
@@ -53,7 +53,7 @@ class TmapTransitErrorTest(TestCase):
                     data_app.recommend_spontaneous_destinations(request(TransportMode.PUBLIC_TRANSIT))
                 self.assertEqual(error.exception.status_code, 503 if status == 429 else 502)
                 self.assertEqual(error.exception.detail,
-                                 "TMAP_QUOTA_EXCEEDED" if status == 429 else "EXTERNAL_ROUTING_API_ERROR")
+                                  "ODSAY_QUOTA_EXCEEDED" if status == 429 else "EXTERNAL_ROUTING_API_ERROR")
                 self.assertEqual(http.call_count, 2)
 
 

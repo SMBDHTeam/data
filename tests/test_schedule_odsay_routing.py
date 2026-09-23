@@ -40,4 +40,3 @@ class ScheduleOdsayRoutingTest(TestCase):
         self.assertEqual(transit.segments[2].start_station_name, "벡스코")
         self.assertEqual(transit.segments[2].end_station_name, "센텀시티")
         tmap.assert_not_called()
-

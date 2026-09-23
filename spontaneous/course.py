@@ -1296,12 +1296,13 @@ def route_result_to_transit(
     or guidance from the request endpoints.
     """
     wait_minutes = max(
-        0,
+        route.waitMinutes,
         int((route.departureAt - route.requestedDepartureAt).total_seconds() // 60),
     )
     realtime_status = (
         "PARTIAL"
         if "BIMS" in route.provider or "TIMETABLE" in route.provider
+        or "ODSAY_SUBWAY" in route.provider
         else "UNAVAILABLE"
     )
     provider_legs = list(route.legs)
@@ -1375,6 +1376,10 @@ def route_result_to_transit(
                 }
             )
     else:
+        wait_segment_index = next(
+            (index for index, leg in enumerate(legs, start=1) if leg.mode != "WALK"),
+            1,
+        )
         for index, leg in enumerate(legs, start=1):
             station_ids = list(leg.stationIds)
             segments.append(
@@ -1390,7 +1395,7 @@ def route_result_to_transit(
                     "durationMinutes": leg.sectionTime or 0,
                     "distanceMeters": None,
                     "stationCount": len(station_ids) or None,
-                    "waitMinutes": wait_minutes if index == 1 else 0,
+                    "waitMinutes": wait_minutes if index == wait_segment_index else 0,
                     "realtimeStatus": realtime_status,
                 }
             )
@@ -1412,11 +1417,17 @@ def route_result_to_transit(
                     "coordinates": coordinates,
                 }
             )
+        if route.routeLines:
+            route_lines = list(route.routeLines)
 
     walk_minutes = (
         route.travelMinutes
         if route.mode == TransportMode.WALK
         else sum((leg.sectionTime or 0) for leg in legs if leg.mode.upper() == "WALK")
+    )
+    unverified_transit = (
+        sum(leg.mode == "BUS" for leg in legs) > int("BIMS" in route.provider)
+        or sum(leg.mode == "SUBWAY" for leg in legs) > int("ODSAY_SUBWAY" in route.provider)
     )
     return {
         "routeType": route_type,
@@ -1435,19 +1446,22 @@ def route_result_to_transit(
             0,
             len([leg for leg in legs if leg.mode.upper() not in {"WALK"}]) - 1,
         ),
-        "fareAmount": None,
+        "fareAmount": route.fareAmount,
         "provider": route.provider,
         "realtimeStatus": realtime_status,
         "fallbackUsed": (
             not has_tmap_geometry
             if is_tmap_road_route
-            else False
+            else any(line["fallbackUsed"] for line in route_lines)
         ),
         "segments": segments,
         "warnings": (
-            []
-            if has_tmap_geometry
-            else ["제공사가 상세 경로 선형을 제공하지 않았습니다."]
+            (["제공사가 상세 경로 선형을 제공하지 않았습니다."]
+             if any(line["fallbackUsed"] for line in route_lines) else [])
+            + (["일부 대중교통 구간의 실제 운행 시각은 확인되지 않았습니다."]
+               if route.mode == TransportMode.PUBLIC_TRANSIT and route.provider.startswith("ODSAY")
+               and unverified_transit
+               else [])
         ),
         "route_lines": route_lines,
     }

@@ -3,9 +3,10 @@ import logging
 import os
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from math import isfinite
+from decimal import Decimal
+from math import ceil, isfinite
 
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -16,6 +17,7 @@ from spontaneous.models import (
     TransportMode,
     TransportOption,
 )
+from transit.routing import TransitPoint, odsay_path_to_models
 
 MIN_STAY_MINUTES = 60
 log = logging.getLogger("data.spontaneous.routing")
@@ -56,6 +58,9 @@ class RouteResult:
     routeCoordinates: tuple[tuple[float, float], ...] = ()
     routeSteps: tuple[TmapRouteStep, ...] = ()
     totalDistanceMeters: int | None = None
+    routeLines: tuple[dict, ...] = ()
+    fareAmount: int | None = None
+    waitMinutes: int = 0
 
 
 @dataclass(frozen=True)
@@ -1068,7 +1073,7 @@ def refine_public_transit_route(
     departure_at: datetime,
     cache: dict | None = None,
 ) -> RouteResult | None:
-    provider_parts = ["TMAP_TRANSIT"]
+    provider_parts = [route.provider]
     subway_legs = [
         leg
         for leg in candidate.legs
@@ -1082,6 +1087,10 @@ def refine_public_transit_route(
 
     if subway_legs:
         leg = subway_legs[0]
+        leading_walk = sum(
+            item.sectionTime or 0 for item in candidate.legs[:candidate.legs.index(leg)]
+            if item.mode == "WALK"
+        )
         start_station_id = (
             leg.stationIds[0]
             if leg.stationIds
@@ -1107,7 +1116,7 @@ def refine_public_transit_route(
             schedule = search_odsay_subway_schedule(
                 start_station_id,
                 end_station_id,
-                departure_at,
+                departure_at + timedelta(minutes=leading_walk),
                 cache=cache,
             )
 
@@ -1119,27 +1128,29 @@ def refine_public_transit_route(
                 provider_parts.append("ODSAY_SUBWAY")
 
                 if len(subway_legs) == 1 and not bus_legs:
-                    travel_minutes = int(
-                        (
-                            schedule.arrivalAt
-                            - schedule.departureAt
-                        ).total_seconds()
-                        + 59
-                    ) // 60
-                    return RouteResult(
+                    trailing_walk = sum(
+                        item.sectionTime or 0 for item in candidate.legs[candidate.legs.index(leg) + 1:]
+                        if item.mode == "WALK"
+                    )
+                    arrival_at = schedule.arrivalAt + timedelta(minutes=trailing_walk)
+                    travel_minutes = int((arrival_at - departure_at).total_seconds() + 59) // 60
+                    return replace(
+                        route,
                         travelMinutes=max(1, travel_minutes),
-                        requestedDepartureAt=route.requestedDepartureAt,
-                        departureAt=schedule.departureAt,
-                        arrivalAt=schedule.arrivalAt,
-                        mode=route.mode,
+                        arrivalAt=arrival_at,
                         provider="+".join(provider_parts),
-                        legs=route.legs,
+                        waitMinutes=max(0, int((schedule.departureAt - departure_at).total_seconds() // 60) - leading_walk),
                     )
 
     if bus_legs:
+        bus_leg = bus_legs[0]
+        leading_walk = sum(
+            item.sectionTime or 0 for item in candidate.legs[:candidate.legs.index(bus_leg)]
+            if item.mode == "WALK"
+        )
         realtime = select_busan_bims_realtime(
-            bus_legs[0],
-            departure_at,
+            bus_leg,
+            departure_at + timedelta(minutes=leading_walk),
             cache=cache,
         )
 
@@ -1147,26 +1158,23 @@ def refine_public_transit_route(
             provider_parts.append("BUSAN_BIMS")
 
             if len(bus_legs) == 1 and not subway_legs:
-                return RouteResult(
-                    travelMinutes=route.travelMinutes,
-                    requestedDepartureAt=route.requestedDepartureAt,
-                    departureAt=realtime.boardingAt,
-                    arrivalAt=realtime.boardingAt + timedelta(minutes=route.travelMinutes),
-                    mode=route.mode,
+                trailing_walk = sum(
+                    item.sectionTime or 0 for item in candidate.legs[candidate.legs.index(bus_leg) + 1:]
+                    if item.mode == "WALK"
+                )
+                arrival_at = realtime.boardingAt + timedelta(
+                    minutes=(bus_leg.sectionTime or route.travelMinutes) + trailing_walk
+                )
+                return replace(
+                    route,
+                    travelMinutes=max(1, int((arrival_at - departure_at).total_seconds() + 59) // 60),
+                    arrivalAt=arrival_at,
                     provider="+".join(provider_parts),
-                    legs=route.legs,
+                    waitMinutes=max(0, int((realtime.boardingAt - departure_at).total_seconds() // 60) - leading_walk),
                 )
 
-    if provider_parts != ["TMAP_TRANSIT"]:
-        return RouteResult(
-            travelMinutes=route.travelMinutes,
-            requestedDepartureAt=route.requestedDepartureAt,
-            departureAt=route.departureAt,
-            arrivalAt=route.arrivalAt,
-            mode=route.mode,
-            provider="+".join(provider_parts),
-            legs=route.legs,
-        )
+    if provider_parts != [route.provider]:
+        return replace(route, provider="+".join(provider_parts))
 
     return route
 
@@ -1359,10 +1367,10 @@ def raise_odsay_error(
     )
 
 
-def search_public_transit_minutes(
+def search_public_transit_paths(
     origin: Coordinate,
     destination: Coordinate,
-) -> int | None:
+) -> list[dict]:
     enabled = os.getenv("ODSAY_ENABLED", "false").lower() == "true"
     api_key = os.getenv("ODSAY_API_KEY", "").strip()
 
@@ -1494,33 +1502,155 @@ def search_public_transit_minutes(
         )
 
     result = payload.get("result", {})
-    paths = result.get("path", [])
+    paths = result.get("path", []) if isinstance(result, dict) else []
 
     if not paths:
         log.info("routing provider=ODsay status=no_route")
-        return None
+        return []
 
-    valid_minutes: list[int] = []
+    valid_paths: list[dict] = []
 
     for path in paths:
+        if not isinstance(path, dict):
+            continue
         info = path.get("info", {})
         total_time = parse_route_minutes(
-            info.get("totalTime")
+            info.get("totalTime") if isinstance(info, dict) else None
         )
 
-        if total_time is not None:
-            valid_minutes.append(total_time)
+        if total_time is not None and isinstance(path.get("subPath"), list):
+            valid_paths.append(path)
 
-    if not valid_minutes:
+    if not valid_paths:
         log.info("routing provider=ODsay status=no_route")
-        return None
+        return []
 
 
     log.info(
-        "routing provider=ODsay status=success minutes=%s",
-        min(valid_minutes),
+        "routing provider=ODsay status=success paths=%s",
+        len(valid_paths),
     )
-    return min(valid_minutes)
+    return sorted(valid_paths, key=lambda path: int(path["info"]["totalTime"]))
+
+
+def search_public_transit_minutes(
+    origin: Coordinate,
+    destination: Coordinate,
+) -> int | None:
+    paths = search_public_transit_paths(origin, destination)
+    return int(paths[0]["info"]["totalTime"]) if paths else None
+
+
+def search_odsay_transit_route(
+    origin: Coordinate,
+    destination: Coordinate,
+    departure_at: datetime,
+    cache: dict | None = None,
+) -> RouteResult | None:
+    """Reuse planned-trip ODsay route shaping without any TMAP request."""
+    walk_distance = calculate_distance_meters(
+        origin.latitude, origin.longitude, destination.latitude, destination.longitude,
+    )
+    if walk_distance is not None and walk_distance <= 1_200:
+        walk_minutes = 0 if walk_distance < 1 else max(5, ceil(walk_distance / 70))
+        return RouteResult(
+            travelMinutes=walk_minutes,
+            requestedDepartureAt=departure_at,
+            departureAt=departure_at,
+            arrivalAt=departure_at + timedelta(minutes=walk_minutes),
+            mode=TransportMode.PUBLIC_TRANSIT,
+            provider="INTERNAL_WALK",
+            legs=(TransitLeg(mode="WALK", sectionTime=walk_minutes),),
+            routeLines=({
+                "mode": "WALK",
+                "lineName": None,
+                "startName": origin.name,
+                "endName": destination.name,
+                "durationMinutes": walk_minutes,
+                "distanceMeters": round(walk_distance),
+                "instruction": None,
+                "fallbackUsed": True,
+                "coordinates": [
+                    [origin.longitude, origin.latitude],
+                    [destination.longitude, destination.latitude],
+                ],
+            },),
+        )
+    origin_point = TransitPoint(
+        origin.name or "출발지",
+        Decimal(str(origin.longitude)),
+        Decimal(str(origin.latitude)),
+    )
+    destination_point = TransitPoint(
+        destination.name or "도착지",
+        Decimal(str(destination.longitude)),
+        Decimal(str(destination.latitude)),
+    )
+    path_key = ("odsay_paths", *travel_cache_key(TransportMode.PUBLIC_TRANSIT, origin, destination))
+    if cache is not None and path_key in cache:
+        paths = cache[path_key]
+    else:
+        paths = search_public_transit_paths(origin, destination)
+        if cache is not None:
+            cache[path_key] = paths
+    for path in paths:
+        try:
+            transit, lines = odsay_path_to_models(
+                path, origin_point, destination_point, "INBOUND", 1,
+                use_tmap_walking=False,
+            )
+        except (TypeError, ValueError) as exc:
+            log.warning("routing provider=ODsay status=invalid_path reason=%s", type(exc).__name__)
+            continue
+        if not any(segment.mode in {"BUS", "SUBWAY"} for segment in transit.segments):
+            continue
+        legs = tuple(
+            TransitLeg(
+                mode=segment.mode,
+                route=segment.line_name,
+                routeId=segment.start_station_id,
+                startName=segment.start_station_name,
+                startLongitude=float(line.coordinates[0][0]) if line.coordinates else None,
+                startLatitude=float(line.coordinates[0][1]) if line.coordinates else None,
+                endName=segment.end_station_name,
+                endLongitude=float(line.coordinates[-1][0]) if line.coordinates else None,
+                endLatitude=float(line.coordinates[-1][1]) if line.coordinates else None,
+                sectionTime=segment.duration_minutes,
+                stationIds=tuple(
+                    station_id for station_id in
+                    (segment.start_station_id, segment.end_station_id)
+                    if station_id
+                ),
+            )
+            for segment, line in zip(transit.segments, lines)
+        )
+        route = RouteResult(
+            travelMinutes=transit.total_minutes,
+            requestedDepartureAt=departure_at,
+            departureAt=departure_at,
+            arrivalAt=departure_at + timedelta(minutes=transit.total_minutes),
+            mode=TransportMode.PUBLIC_TRANSIT,
+            provider="ODSAY",
+            legs=legs,
+            routeLines=tuple(
+                {
+                    key: ([] if key == "coordinates" and line.fallback_used else value)
+                    for key, value in line.model_dump(mode="json", by_alias=True).items()
+                    if key not in {"dayNo", "routeOrder", "lineOrder"}
+                }
+                for line in lines
+            ),
+            fareAmount=transit.fare_amount,
+        )
+        refined = refine_public_transit_route(
+            route,
+            TransitRouteCandidate(transit.total_minutes * 60, legs, path),
+            departure_at,
+            cache=cache,
+        )
+        if refined is not None:
+            return refined
+    return None
 
 
 
@@ -2038,7 +2168,7 @@ def search_route(
     tmap_route = None
 
     if mode == TransportMode.PUBLIC_TRANSIT:
-        route = search_tmap_transit_route(
+        route = search_odsay_transit_route(
             origin,
             destination,
             departure_at,

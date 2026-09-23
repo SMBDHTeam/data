@@ -175,6 +175,8 @@ def odsay_path_to_models(
     destination: TransitPoint,
     route_type: str,
     route_order: int,
+    *,
+    use_tmap_walking: bool = True,
 ) -> tuple[ScheduleTransit, list[RouteLine]]:
     info = as_dict(path.get("info"))
     sub_paths = as_list(path.get("subPath"))
@@ -222,7 +224,7 @@ def odsay_path_to_models(
             # origin/destination coordinates and ask TMAP to recalculate them:
             # that turns a short access walk into the full trip's walking time.
             tmap_route = None
-            if len(coordinates) >= 2:
+            if use_tmap_walking and len(coordinates) >= 2:
                 line_start = coordinates[0]
                 line_end = coordinates[-1]
                 tmap_route = find_tmap_walking_route_if_enabled(

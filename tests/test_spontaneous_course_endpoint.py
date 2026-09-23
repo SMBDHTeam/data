@@ -329,21 +329,21 @@ class SpontaneousCourseEndpointTest(TestCase):
             response = data_app.create_spontaneous_course(course_request(themes=()))
         self.assertEqual([stop["contentId"] for stop in response["course"]], [CAFE["contentid"]])
 
-    def test_tmap_429_reaches_course_http_503_without_retry(self):
+    def test_odsay_429_reaches_course_http_503_without_retry(self):
         payload = course_request(mode=TransportMode.PUBLIC_TRANSIT)
         with (
             provider_boundaries(),
             patch("spontaneous.course.search_route", wraps=search_route),
-            patch.dict("os.environ", {"SKT_API_KEY": "test-key"}),
+            patch.dict("os.environ", {"ODSAY_ENABLED": "true", "ODSAY_API_KEY": "test-key"}),
             patch("spontaneous.routing.urlopen", side_effect=HTTPError(
-                "https://apis.openapi.sk.com/transit/routes", 429, "quota", None, None
-            )) as tmap_http,
+                "https://api.odsay.com/v1/api/searchPubTransPathT", 429, "quota", None, None
+            )) as odsay_http,
         ):
             with self.assertRaises(HTTPException) as error:
                 data_app.create_spontaneous_course(payload)
         self.assertEqual(error.exception.status_code, 503)
-        self.assertEqual(error.exception.detail, "TMAP_QUOTA_EXCEEDED")
-        self.assertEqual(tmap_http.call_count, 1)
+        self.assertEqual(error.exception.detail, "ODSAY_QUOTA_EXCEEDED")
+        self.assertEqual(odsay_http.call_count, 1)
 
 
 if __name__ == "__main__":

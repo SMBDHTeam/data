@@ -115,10 +115,10 @@ def providers(places, hours=None, routing=None, now=START_AT):
 
     with (
         patch("spontaneous.time_window.current_kst_time", return_value=now),
-        patch.dict("os.environ", {"TOUR_API_KEY": "test-key", "SKT_API_KEY": "test-key"}),
+        patch.dict("os.environ", {"TOUR_API_KEY": "test-key", "ODSAY_ENABLED": "true", "ODSAY_API_KEY": "test-key"}),
         patch("app.search_places_by_zone", side_effect=lambda zone, places_cache=None: places),
         patch("spontaneous.places.urlopen", side_effect=detail),
-        patch("spontaneous.routing.search_tmap_transit_route", side_effect=route),
+        patch("spontaneous.routing.search_odsay_transit_route", side_effect=route),
         patch("app.calculate_sequential_course_timeline", wraps=calculate_sequential_course_timeline) as timeline,
     ):
         calls["timeline"] = timeline
@@ -271,20 +271,23 @@ class SpontaneousCourseFallbackTest(TestCase):
             )
         self.assertEqual(calls["timeline"].call_count, 2)
 
-    def test_tmap_429_and_5xx_abort_without_place_retry(self):
-        from spontaneous.routing import search_tmap_transit_route
+    def test_odsay_429_and_5xx_abort_without_place_retry(self):
+        from spontaneous.routing import search_odsay_transit_route
 
+        distant_places = [place(f"c{index}", rank=index) for index in range(1, 6)]
+        for index, item in enumerate(distant_places, start=1):
+            item["mapy"] = str(START.latitude + 0.02 + index * 0.001)
         for status in (429, 500, 503):
             with self.subTest(status=status), providers(
-                [place(f"c{index}", rank=index) for index in range(1, 6)],
+                distant_places,
             ) as calls, patch(
-                "spontaneous.routing.search_tmap_transit_route", wraps=search_tmap_transit_route,
+                "spontaneous.routing.search_odsay_transit_route", wraps=search_odsay_transit_route,
             ), patch("spontaneous.routing.urlopen", side_effect=HTTPError(
-                "https://apis.openapi.sk.com/transit/routes", status, "provider error", None, None,
+                "https://api.odsay.com/v1/api/searchPubTransPathT", status, "provider error", None, None,
             )) as http:
                 self.assertEqual(post_json(COURSE_URL, payload()), (
                     503 if status == 429 else 502,
-                    {"detail": "TMAP_QUOTA_EXCEEDED" if status == 429 else "EXTERNAL_ROUTING_API_ERROR"},
+                    {"detail": "ODSAY_QUOTA_EXCEEDED" if status == 429 else "EXTERNAL_ROUTING_API_ERROR"},
                 ))
             self.assertEqual(calls["timeline"].call_count, 1)
             self.assertEqual(http.call_count, 1)

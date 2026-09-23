@@ -215,7 +215,7 @@ class SequentialCourseRoutingTest(TestCase):
         )
 
         with patch(
-            "spontaneous.routing.search_tmap_transit_route",
+            "spontaneous.routing.search_odsay_transit_route",
             return_value=provider_route,
         ) as provider:
             route = search_route(
@@ -387,7 +387,7 @@ class SequentialCourseRoutingTest(TestCase):
 
     def test_public_transit_cache_includes_departure_at(self):
         with patch(
-            "spontaneous.routing.search_tmap_transit_route",
+            "spontaneous.routing.search_odsay_transit_route",
             side_effect=[
                 RouteResult(
                     travelMinutes=10,
@@ -777,7 +777,7 @@ class SequentialCourseRoutingTest(TestCase):
             provider="TMAP_TRANSIT",
         )
 
-        with patch("spontaneous.routing.search_tmap_transit_route", return_value=route) as provider:
+        with patch("spontaneous.routing.search_odsay_transit_route", return_value=route) as provider:
             cache = {}
             first = search_route(TransportMode.PUBLIC_TRANSIT, HOME, A_COORD, start_at, cache=cache)
             second = search_route(TransportMode.PUBLIC_TRANSIT, HOME, A_COORD, start_at, cache=cache)

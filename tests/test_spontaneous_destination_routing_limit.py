@@ -160,7 +160,7 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
             with patch("app.get_transport_option", side_effect=wrapped_get_transport_option):
                 with patch("spontaneous.routing.search_route", side_effect=wrapped_search_route):
                     with patch(
-                        "spontaneous.routing.search_tmap_transit_route",
+                        "spontaneous.routing.search_odsay_transit_route",
                         side_effect=fake_tmap_transit_route,
                     ):
                         response = data_app.recommend_spontaneous_destinations(
@@ -495,7 +495,7 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
             )
 
         with self.patch_preranking(), patch(
-            "spontaneous.routing.search_tmap_transit_route", side_effect=provider
+            "spontaneous.routing.search_odsay_transit_route", side_effect=provider
         ) as tmap:
             response = data_app.recommend_spontaneous_destinations(
                 request(TransportMode.PUBLIC_TRANSIT)
@@ -518,7 +518,7 @@ class SpontaneousDestinationRoutingLimitTest(TestCase):
                 payload = request(TransportMode.PUBLIC_TRANSIT)
                 payload.returnBy = payload.startAt + timedelta(minutes=total_minutes)
                 with self.patch_preranking(), patch(
-                    "spontaneous.routing.search_tmap_transit_route", side_effect=provider
+                    "spontaneous.routing.search_odsay_transit_route", side_effect=provider
                 ) as tmap:
                     if total_minutes == 79:
                         with self.assertRaises(HTTPException) as error:

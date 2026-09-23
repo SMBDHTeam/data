@@ -123,7 +123,7 @@ def find_route(
         transit = tmap_walk_transit(origin, destination, route_type, route_order, tmap_route)
         return transit, tmap_route_lines(origin, destination, transit, tmap_route)
 
-    transit = walk_fallback_transit(
+    transit = unresolved_public_transit(
         origin,
         destination,
         route_type,
@@ -132,7 +132,7 @@ def find_route(
         distance_meters=int(round(walk_distance)),
     )
     logger.info(
-        "transit fallback=estimated_walk route_type=%s route_order=%s origin=%s destination=%s distance_meters=%s total_minutes=%s",
+        "transit fallback=unresolved_public route_type=%s route_order=%s origin=%s destination=%s distance_meters=%s total_minutes=%s",
         route_type,
         route_order,
         origin.name,
@@ -140,7 +140,7 @@ def find_route(
         int(round(walk_distance)),
         transit.total_minutes,
     )
-    return transit, direct_route_lines(origin, destination, transit)
+    return transit, []
 
 
 def search_odsay_path(origin: TransitPoint, destination: TransitPoint, api_key: str) -> dict[str, Any]:
@@ -191,6 +191,13 @@ def odsay_path_to_models(
         line_name = line_name_for(sub_path)
         start_name = first_text(sub_path, "startName", "startStationName") or origin.name
         end_name = first_text(sub_path, "endName", "endStationName") or destination.name
+        if mode == "WALK":
+            start_name, end_name = walk_segment_names(
+                sub_paths,
+                index - 1,
+                origin.name,
+                destination.name,
+            )
         duration_minutes = int_value(sub_path, "sectionTime")
         distance = first_int(sub_path, "distance", "sectionDistance")
         segment = ScheduleSegment(
@@ -213,16 +220,18 @@ def odsay_path_to_models(
         coordinates = coordinate_pairs_from_sub_path(sub_path)
         fallback_used = False
         if mode == "WALK":
-            line_start = coordinates[0] if coordinates else previous_line_end
-            line_end = coordinates[-1] if coordinates else coordinates_from_name(end_name, destination, origin, use_destination=True)
-            tmap_route = (
-                find_tmap_walking_route_if_enabled(
+            # ODSAY walking subpaths often omit coordinates. Do not synthesize
+            # origin/destination coordinates and ask TMAP to recalculate them:
+            # that turns a short access walk into the full trip's walking time.
+            tmap_route = None
+            if use_tmap_walking and len(coordinates) >= 2:
+                line_start = coordinates[0]
+                line_end = coordinates[-1]
+                tmap_route = find_tmap_walking_route_if_enabled(
                     TransitPoint(start_name, line_start[0], line_start[1]),
                     TransitPoint(end_name, line_end[0], line_end[1]),
                     distance,
                 )
-                if use_tmap_walking else None
-            )
             if tmap_route is not None:
                 coordinates = tmap_route.coordinates
                 distance = tmap_route.distance_meters
@@ -324,6 +333,36 @@ def walk_fallback_transit(
             )
         ],
         warnings=[],
+    )
+
+
+def unresolved_public_transit(
+    origin: TransitPoint,
+    destination: TransitPoint,
+    route_type: str,
+    route_order: int,
+    total_minutes: int,
+    distance_meters: int,
+) -> ScheduleTransit:
+    return ScheduleTransit(
+        routeType=route_type,
+        routeOrder=route_order,
+        originName=origin.name,
+        destinationName=destination.name,
+        summary="대중교통 경로 확인 필요",
+        totalMinutes=total_minutes,
+        walkMinutes=0,
+        waitMinutes=0,
+        transferCount=0,
+        fareAmount=None,
+        provider="UNRESOLVED",
+        realtimeStatus="UNAVAILABLE",
+        fallbackUsed=True,
+        segments=[],
+        warnings=[
+            "대중교통 경로를 계산하지 못했습니다. 실제 이동수단과 소요 시간을 확인해 주세요.",
+        ],
+        route_lines=[],
     )
 
 
@@ -616,6 +655,27 @@ def first_text(source: dict[str, Any], *keys: str) -> str | None:
         if value is not None and str(value).strip():
             return str(value)
     return None
+
+
+def walk_segment_names(
+    sub_paths: list[dict[str, Any]],
+    index: int,
+    origin_name: str,
+    destination_name: str,
+) -> tuple[str, str]:
+    previous = sub_paths[index - 1] if index > 0 else {}
+    following = sub_paths[index + 1] if index + 1 < len(sub_paths) else {}
+    start_name = (
+        first_text(previous, "endName", "endStationName")
+        if previous
+        else origin_name
+    ) or origin_name
+    end_name = (
+        first_text(following, "startName", "startStationName")
+        if following
+        else destination_name
+    ) or destination_name
+    return start_name, end_name
 
 
 def map_mode(traffic_type: int) -> str:

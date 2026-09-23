@@ -731,6 +731,10 @@ def _save_spontaneous_schedule_rows(cur, schedule: ScheduleResponse, owner_id: i
 
 
 def delete_schedule_children(cur, schedule_id: UUID) -> None:
+    # These records reference schedules directly and must be removed before
+    # deleting the schedule itself because the schema does not use ON DELETE CASCADE.
+    cur.execute("DELETE FROM share_links WHERE schedule_id = %s", (schedule_id,))
+    cur.execute("DELETE FROM schedule_creation_requests WHERE schedule_id = %s", (schedule_id,))
     cur.execute("DELETE FROM schedule_fixed_events WHERE schedule_id = %s", (schedule_id,))
     cur.execute(
         """
@@ -969,6 +973,24 @@ def load_schedule(schedule_id: UUID) -> ScheduleResponse:
     return items[0]
 
 
+def delete_schedule(schedule_id: UUID, user_id: int | None = None) -> None:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            if user_id is None:
+                cur.execute("SELECT id FROM schedules WHERE id = %s", (schedule_id,))
+            else:
+                cur.execute(
+                    "SELECT id FROM schedules WHERE id = %s AND user_id = %s",
+                    (schedule_id, user_id),
+                )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Schedule not found")
+
+            delete_schedule_children(cur, schedule_id)
+            cur.execute("DELETE FROM schedules WHERE id = %s", (schedule_id,))
+        conn.commit()
+
+
 def list_schedules(user_id: int | None = None) -> ScheduleListResponse:
     """일정 목록.
 
@@ -1111,7 +1133,10 @@ def load_schedules(schedule_ids: list[UUID]) -> ScheduleListResponse:
             startLocationSource=row["start_location_source"],
             endLocationSource=row["end_location_source"],
             summary=f"{len(stops_by_day.get(row['id'], []))}개 방문지",
-            stops=stops_by_day.get(row["id"], []),
+            stops=sorted(
+                stops_by_day.get(row["id"], []),
+                key=lambda stop: stop.order,
+            ),
             finalTransit=route_to_model(final_route),
         )
         days_by_schedule.setdefault(row["schedule_id"], []).append(day)

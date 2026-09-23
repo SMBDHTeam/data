@@ -141,6 +141,10 @@
 
 - 사용자 응답에서는 `TMAP`, `INTERNAL_WALK`, `FASTAPI_MIGRATION` 같은 공급자명을 최대한 숨기도록 정리했습니다.
 - 기존 DB에 저장된 일정 조회도 같은 기준으로 정규화합니다.
+- `ODSAY_ENABLED=false` 이거나 `ODSAY_API_KEY`가 없으면 대중교통 경로를 호출하지 않습니다.
+- `TMAP_WALKING_ENABLED=false` 이거나 `SKT_API_KEY`가 실제 값이 아니면 TMAP 보행 경로를 호출하지 않습니다.
+- ODSAY/TMAP을 모두 사용할 수 없거나 외부 API가 실패하면 내부 거리 기반 도보 fallback이 사용됩니다.
+- 긴 구간이 `도보 90분`처럼 보이면 우선 `data-ai` 컨테이너 env와 `transit odsay_skipped`, `transit tmap_skipped`, `transit fallback=estimated_walk` 로그를 확인해야 합니다.
 
 ### 일정 채우기 보정
 
@@ -190,6 +194,7 @@ SPRING_DATASOURCE_USERNAME=...
 SPRING_DATASOURCE_PASSWORD=...
 ODSAY_ENABLED=true
 ODSAY_API_KEY=...
+TMAP_WALKING_ENABLED=true
 SKT_API_KEY=...
 ```
 
